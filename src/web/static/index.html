@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PM Arbitrage</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+</head>
+<body>
+  <div class="layout">
+
+    <!-- ── Sidebar ── -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/>
+            <line x1="12" y1="22" x2="12" y2="15.5"/>
+            <polyline points="22 8.5 12 15.5 2 8.5"/>
+            <polyline points="2 15.5 12 8.5 22 15.5"/>
+            <line x1="12" y1="2" x2="12" y2="8.5"/>
+          </svg>
+          <h1>PM Arbitrage</h1>
+        </div>
+        <div class="connection-status">
+          <div class="status-dot status-dot--disconnected" id="ws-dot"></div>
+          <span id="ws-label">Connecting…</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-tab="overview" onclick="showTab('overview')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span>Overview</span>
+        </div>
+        <div class="nav-item" data-tab="live" onclick="showTab('live')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span>Live Trading</span>
+        </div>
+        <div class="nav-item" data-tab="positions" onclick="showTab('positions')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          <span>Positions</span>
+        </div>
+        <div class="nav-item" data-tab="risk" onclick="showTab('risk')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Risk Monitor</span>
+        </div>
+        <div class="nav-item" data-tab="performance" onclick="showTab('performance')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>Performance</span>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="system-status">
+          <div class="status-dot" id="system-dot"></div>
+          <span id="system-label" class="system-label">System</span>
+        </div>
+        <div class="system-detail text-muted" id="system-detail">Initializing…</div>
+      </div>
+    </aside>
+
+    <!-- ── Main Content ── -->
+    <main class="main">
+
+      <!-- Overview Tab -->
+      <section class="tab-content active" id="tab-overview">
+        <div class="page-header">
+          <h2>Overview</h2>
+          <div id="mode-banner" class="mode-banner" style="display:none"></div>
+        </div>
+
+        <div class="kpi-grid" id="overview-kpis">
+          <div class="card kpi-card">
+            <div class="kpi-label">Portfolio Value</div>
+            <div class="kpi-value" id="kpi-portfolio-value">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label" id="kpi-equity-label">Wallet Balance</div>
+            <div class="kpi-value" id="kpi-equity">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Live P&L</div>
+            <div class="kpi-value" id="kpi-daily-pnl">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Win Rate</div>
+            <div class="kpi-value" id="kpi-win-rate">—</div>
+            <div class="kpi-sub" id="kpi-win-detail"></div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Drawdown</div>
+            <div class="kpi-value" id="kpi-drawdown">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Active Positions</div>
+            <div class="kpi-value" id="kpi-positions">—</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Equity Curve</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="chart-equity"></canvas>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Platform Health</span>
+            </div>
+            <div class="health-grid" id="health-grid">
+              <!-- Rendered by JS -->
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-24">
+          <div class="card-header">
+            <span class="card-title">Active Trades</span>
+            <span class="pill pill--green" id="overview-active-count">0</span>
+          </div>
+          <div id="overview-active-positions">
+            <div class="empty-state"><p>No active trades</p></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Recent Signals</span>
+            </div>
+            <div class="event-stream" id="overview-signals">
+              <div class="empty-state"><p>Waiting for signals…</p></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Execution Quality</span>
+            </div>
+            <div id="exec-quality">
+              <div class="empty-state"><p>Waiting for fills…</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Live Trading Tab -->
+      <section class="tab-content" id="tab-live">
+        <div class="page-header">
+          <h2>Live Trading</h2>
+          <p>Real-time spread detection and event stream</p>
+        </div>
+
+        <div class="card mb-24">
+          <div class="card-header">
+            <span class="card-title">Spread Detection</span>
+            <span class="pill pill--blue" id="spread-count">0 spreads</span>
+          </div>
+          <div class="chart-container">
+            <canvas id="chart-spreads"></canvas>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Event Stream</span>
+            <span class="pill pill--gray" id="event-count">0 events</span>
+          </div>
+          <div class="event-stream" id="event-stream">
+            <div class="empty-state"><p>Waiting for events…</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Positions Tab -->
+      <section class="tab-content" id="tab-positions">
+        <div class="page-header">
+          <h2>Positions</h2>
+          <p>Active and closed trading positions</p>
+        </div>
+
+        <div class="card mb-24">
+          <div class="card-header">
+            <span class="card-title">Active Positions</span>
+            <span class="pill pill--green" id="active-pos-count">0</span>
+          </div>
+          <div id="active-positions-table">
+            <div class="empty-state"><p>No active positions</p></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Closed Positions</span>
+            <span class="pill pill--gray" id="closed-pos-count">0</span>
+          </div>
+          <div id="closed-positions-table">
+            <div class="empty-state"><p>No closed positions yet</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Risk Monitor Tab -->
+      <section class="tab-content" id="tab-risk">
+        <div class="page-header">
+          <h2>Risk Monitor</h2>
+          <p>Tail risk alerts, platform health, and correlations</p>
+        </div>
+
+        <div class="kpi-grid" id="risk-kpis">
+          <div class="card kpi-card">
+            <div class="kpi-label">Tail Risk</div>
+            <div class="kpi-value" id="kpi-tail-risk">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Drawdown</div>
+            <div class="kpi-value" id="kpi-risk-drawdown">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Gas Price</div>
+            <div class="kpi-value" id="kpi-gas">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">CLOB Latency</div>
+            <div class="kpi-value" id="kpi-clob-latency">—</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Risk Alerts</span>
+              <span class="pill pill--amber" id="alert-count">0</span>
+            </div>
+            <div id="alert-list">
+              <div class="empty-state"><p>No risk alerts</p></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">CEX Ticks</span>
+            </div>
+            <div id="cex-ticks">
+              <div class="empty-state"><p>Waiting for ticks…</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Performance Tab -->
+      <section class="tab-content" id="tab-performance">
+        <div class="page-header">
+          <h2>Performance</h2>
+          <p>Backtest results and execution analytics</p>
+        </div>
+
+        <div class="kpi-grid" id="perf-kpis">
+          <div class="card kpi-card">
+            <div class="kpi-label">Total Trades</div>
+            <div class="kpi-value" id="kpi-total-trades">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Win Rate</div>
+            <div class="kpi-value" id="kpi-bt-win-rate">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Profit Factor</div>
+            <div class="kpi-value" id="kpi-profit-factor">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Expectancy</div>
+            <div class="kpi-value" id="kpi-expectancy">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Fill Rate</div>
+            <div class="kpi-value" id="kpi-fill-rate">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-label">Avg Slippage</div>
+            <div class="kpi-value" id="kpi-avg-slippage">—</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">P&L Distribution</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="chart-pnl-dist"></canvas>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Fill Time Distribution</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="chart-fill-time"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Recent Fills</span>
+          </div>
+          <div id="recent-fills-table">
+            <div class="empty-state"><p>No fills yet</p></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app.js?v=2"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# Logs
+*.log
+bot.log
+
+# Data
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Images (reference only)
+*.jpeg
+*.jpg
+*.png
+
+# Claude
+.claude/
