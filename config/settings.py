@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     live_trading_enabled: bool = False
     poly_tick_size: str = "0.01"
 
+    # ── Polymarket Builder API (gasless orders + autoclaim) ──
+    poly_builder_api_key: str = ""
+    poly_builder_secret: str = ""
+    poly_builder_passphrase: str = ""
+
+    # ── Position Sizing ──
+    position_size_pct: float = 0.10
+
     # ── Binance ──
     binance_api_key: str = ""
     binance_api_secret: str = ""

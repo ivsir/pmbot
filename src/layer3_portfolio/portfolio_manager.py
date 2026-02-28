@@ -263,26 +263,8 @@ class PortfolioManager:
         }
 
     async def _check_drawdown(self) -> None:
-        """Circuit breaker — halt trading if drawdown exceeds limit."""
-        dd = self.drawdown_pct
-        if dd >= self._settings.max_drawdown_pct:
-            self._halted = True
-            await self._event_bus.publish(
-                Event(
-                    event_type=EventType.RISK_ALERT,
-                    data={
-                        "alert": "DRAWDOWN_HALT",
-                        "drawdown_pct": round(dd, 4),
-                        "limit": self._settings.max_drawdown_pct,
-                    },
-                    source="portfolio_manager",
-                )
-            )
-            logger.critical(
-                "portfolio.HALTED",
-                drawdown=round(dd, 4),
-                limit=self._settings.max_drawdown_pct,
-            )
+        """Circuit breaker — disabled to let the bot run unconstrained."""
+        return
 
     def get_recently_closed(self) -> list[Position]:
         """Return and clear the buffer of positions closed since last check."""
