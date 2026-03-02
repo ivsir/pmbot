@@ -109,7 +109,7 @@ async def build_snapshot(system: Any) -> dict[str, Any]:
 
     # Live trade stats from actual closed positions (not backtest)
     live_wins = sum(1 for p in closed_list if (getattr(p, 'pnl_usd', 0) or 0) > 0)
-    live_losses = sum(1 for p in closed_list if (getattr(p, 'pnl_usd', 0) or 0) <= 0 and getattr(p, 'status', '') == 'closed')
+    live_losses = sum(1 for p in closed_list if (getattr(p, 'pnl_usd', 0) or 0) < 0 and getattr(p, 'status', '') == 'closed')
     live_total = live_wins + live_losses
     live_win_rate = live_wins / live_total if live_total > 0 else None
     live_total_pnl = sum(getattr(p, 'pnl_usd', 0) or 0 for p in closed_list)

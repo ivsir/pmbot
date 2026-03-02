@@ -9,6 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/motion@12/dist/motion.js"></script>
   <link rel="stylesheet" href="/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
 </head>
@@ -71,85 +72,16 @@
 
       <!-- Overview Tab -->
       <section class="tab-content active" id="tab-overview">
-        <div class="page-header">
-          <h2>Overview</h2>
+        <div class="overview-dot-grid" id="overview-dot-grid"></div>
+        <div class="overview-hero">
           <div id="mode-banner" class="mode-banner" style="display:none"></div>
-        </div>
-
-        <div class="kpi-grid" id="overview-kpis">
-          <div class="card kpi-card">
-            <div class="kpi-label">Portfolio Value</div>
-            <div class="kpi-value" id="kpi-portfolio-value">—</div>
-          </div>
-          <div class="card kpi-card">
-            <div class="kpi-label" id="kpi-equity-label">Wallet Balance</div>
-            <div class="kpi-value" id="kpi-equity">—</div>
-          </div>
-          <div class="card kpi-card">
-            <div class="kpi-label">Live P&L</div>
-            <div class="kpi-value" id="kpi-daily-pnl">—</div>
-          </div>
-          <div class="card kpi-card">
-            <div class="kpi-label">Win Rate</div>
-            <div class="kpi-value" id="kpi-win-rate">—</div>
-            <div class="kpi-sub" id="kpi-win-detail"></div>
-          </div>
-          <div class="card kpi-card">
-            <div class="kpi-label">Drawdown</div>
-            <div class="kpi-value" id="kpi-drawdown">—</div>
-          </div>
-          <div class="card kpi-card">
-            <div class="kpi-label">Active Positions</div>
-            <div class="kpi-value" id="kpi-positions">—</div>
-          </div>
-        </div>
-
-        <div class="grid-2">
-          <div class="card">
-            <div class="card-header">
-              <span class="card-title">Equity Curve</span>
-            </div>
-            <div class="chart-container">
-              <canvas id="chart-equity"></canvas>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header">
-              <span class="card-title">Platform Health</span>
-            </div>
-            <div class="health-grid" id="health-grid">
-              <!-- Rendered by JS -->
-            </div>
-          </div>
-        </div>
-
-        <div class="card mb-24">
-          <div class="card-header">
-            <span class="card-title">Active Trades</span>
-            <span class="pill pill--green" id="overview-active-count">0</span>
-          </div>
-          <div id="overview-active-positions">
-            <div class="empty-state"><p>No active trades</p></div>
-          </div>
-        </div>
-
-        <div class="grid-2">
-          <div class="card">
-            <div class="card-header">
-              <span class="card-title">Recent Signals</span>
-            </div>
-            <div class="event-stream" id="overview-signals">
-              <div class="empty-state"><p>Waiting for signals…</p></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-header">
-              <span class="card-title">Execution Quality</span>
-            </div>
-            <div id="exec-quality">
-              <div class="empty-state"><p>Waiting for fills…</p></div>
-            </div>
-          </div>
+          <div class="overview-label">Portfolio Value</div>
+          <div class="overview-portfolio-value" id="overview-portfolio-value">$0.00</div>
+          <div class="overview-wallet-label">Wallet</div>
+          <div class="overview-wallet-value" id="overview-wallet-value">$0.00</div>
+          <div class="overview-pnl-label">P&amp;L</div>
+          <div class="overview-pnl-value pnl-zero" id="overview-pnl-value">$0.00</div>
+          <div class="overview-positions" id="overview-positions"></div>
         </div>
       </section>
 

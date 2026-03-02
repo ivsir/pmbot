@@ -11,6 +11,15 @@ const state = {
   spreadHistory: [],
 };
 
+// ── Overview Animation State ──
+
+const overviewState = {
+  dotGridInitialized: false,
+  currentPortfolioValue: 0,
+  currentWalletBalance: 0,
+  currentPnl: 0,
+};
+
 // ── Chart.js Global Config ──
 
 Chart.defaults.color = '#a1a1a1';
@@ -283,11 +292,81 @@ function renderSystemStatus(snap) {
 
 // ── Overview Tab ──
 
+function initDotGrid() {
+  if (overviewState.dotGridInitialized) return;
+
+  const container = document.getElementById('overview-dot-grid');
+  if (!container) return;
+
+  const spacing = 32;
+  const rect = container.getBoundingClientRect();
+  const cols = Math.floor(rect.width / spacing) || 1;
+  const rows = Math.floor(rect.height / spacing) || 1;
+
+  container.style.gridTemplateColumns = `repeat(${cols}, ${spacing}px)`;
+  container.style.gridTemplateRows = `repeat(${rows}, ${spacing}px)`;
+
+  const totalDots = cols * rows;
+  const fragment = document.createDocumentFragment();
+  for (let i = 0; i < totalDots; i++) {
+    const dot = document.createElement('div');
+    dot.className = 'overview-dot';
+    fragment.appendChild(dot);
+  }
+  container.appendChild(fragment);
+
+  overviewState.dotGridInitialized = true;
+  startDotPulse();
+}
+
+function startDotPulse() {
+  if (!window.Motion) return;
+  const { animate, stagger } = Motion;
+
+  function pulse() {
+    animate(
+      '.overview-dot',
+      { opacity: [0.08, 0.35, 0.08], scale: [1, 1.8, 1] },
+      { duration: 4, delay: stagger(0.015, { from: 'center' }), ease: 'ease-in-out' }
+    ).then(() => pulse());
+  }
+
+  pulse();
+}
+
+function animateNumber(elementId, fromValue, toValue, duration, formatter) {
+  const el = document.getElementById(elementId);
+  if (!el) return toValue;
+
+  if (window.Motion && fromValue !== toValue) {
+    Motion.animate(el, { scale: [1, 1.04, 1] }, { duration: 0.3, ease: 'ease-out' });
+  }
+
+  const animKey = elementId + '_raf';
+  if (overviewState[animKey]) cancelAnimationFrame(overviewState[animKey]);
+
+  const startTime = performance.now();
+  const diff = toValue - fromValue;
+
+  function step(currentTime) {
+    const elapsed = currentTime - startTime;
+    const progress = Math.min(elapsed / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const current = fromValue + diff * eased;
+    el.textContent = formatter(current);
+    if (progress < 1) {
+      overviewState[animKey] = requestAnimationFrame(step);
+    }
+  }
+
+  overviewState[animKey] = requestAnimationFrame(step);
+  return toValue;
+}
+
 function renderOverview(snap) {
-  const p = snap.portfolio || {};
-  const bt = snap.backtest || {};
-  const fm = snap.fill_metrics || {};
   const ls = snap.live_stats || {};
+
+  initDotGrid();
 
   // Mode banner
   const banner = document.getElementById('mode-banner');
@@ -307,217 +386,175 @@ function renderOverview(snap) {
     }
   }
 
-  // Portfolio Value (cash + positions)
-  setText('kpi-portfolio-value', '$' + (snap.portfolio_value_usd || snap.wallet_balance_usd || 0).toFixed(2));
+  // Portfolio Value
+  const newPortfolio = snap.portfolio_value_usd || snap.wallet_balance_usd || 0;
+  overviewState.currentPortfolioValue = animateNumber(
+    'overview-portfolio-value', overviewState.currentPortfolioValue, newPortfolio, 600,
+    (v) => '$' + v.toFixed(2)
+  );
 
-  // Wallet Balance (cash only)
-  setText('kpi-equity', '$' + (snap.wallet_balance_usd || 0).toFixed(2));
+  // Wallet Balance
+  const newWallet = snap.wallet_balance_usd || 0;
+  overviewState.currentWalletBalance = animateNumber(
+    'overview-wallet-value', overviewState.currentWalletBalance, newWallet, 600,
+    (v) => '$' + v.toFixed(2)
+  );
 
-  // Live P&L from actual trades
-  const livePnl = ls.total_pnl != null ? ls.total_pnl : p.daily_pnl;
-  setTextWithColor('kpi-daily-pnl', fmtPnl(livePnl), pnlClass(livePnl));
+  // P&L
+  const newPnl = ls.total_pnl != null ? ls.total_pnl : (snap.portfolio?.daily_pnl || 0);
+  overviewState.currentPnl = animateNumber(
+    'overview-pnl-value', overviewState.currentPnl, newPnl, 600,
+    (v) => (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2)
+  );
 
-  // Win Rate — prefer live stats over backtest
-  const winRate = ls.win_rate != null ? ls.win_rate : (bt.win_rate != null ? bt.win_rate : p.win_rate);
-  setTextWithColor('kpi-win-rate', winRate != null ? fmtPct(winRate) : '—',
-    winRate >= 0.7 ? 'text-green' : winRate >= 0.5 ? 'text-amber' : winRate != null ? 'text-red' : '');
-  // Show W/L detail under win rate
-  const winDetail = document.getElementById('kpi-win-detail');
-  if (winDetail) {
-    if (ls.total_trades > 0) {
-      winDetail.innerHTML = `<span class="text-green">${ls.wins}W</span> / <span class="text-red">${ls.losses}L</span>`;
-    } else {
-      winDetail.textContent = '';
+  const pnlEl = document.getElementById('overview-pnl-value');
+  if (pnlEl) {
+    pnlEl.classList.remove('pnl-positive', 'pnl-negative', 'pnl-zero');
+    if (newPnl > 0) pnlEl.classList.add('pnl-positive');
+    else if (newPnl < 0) pnlEl.classList.add('pnl-negative');
+    else pnlEl.classList.add('pnl-zero');
+  }
+
+  // Position cards — active on top, then resolved
+  renderOverviewPositions(snap.active_positions || [], snap.closed_positions || []);
+}
+
+function renderOverviewPositions(active, closed) {
+  const container = document.getElementById('overview-positions');
+  if (!container) return;
+
+  // Merge: active first (newest on top), then closed (newest on top)
+  const sortByTime = (a, b) => (b.filled_at_ms || b.created_at_ms) - (a.filled_at_ms || a.created_at_ms);
+  const activeSorted = [...active].sort(sortByTime);
+  const closedSorted = [...closed].sort(sortByTime);
+  const all = [...activeSorted, ...closedSorted];
+
+  // Scroll fade listener — attach once
+  if (!container.dataset.scrollBound) {
+    container.addEventListener('scroll', () => {
+      container.classList.toggle('is-scrolled', container.scrollTop > 8);
+    }, { passive: true });
+    container.dataset.scrollBound = '1';
+  }
+
+  if (all.length === 0) {
+    if (container.dataset.posFingerprint) { container.innerHTML = ''; container.dataset.posFingerprint = ''; }
+    return;
+  }
+
+  // Fingerprint includes id + status so a close triggers rebuild
+  const fingerprint = all.map((p) => p.id + ':' + p.status).join(',');
+  const prev = container.dataset.posFingerprint || '';
+
+  if (fingerprint === prev) {
+    // Same set — update P&L values in-place
+    all.forEach((p) => {
+      const card = container.querySelector(`[data-pos-id="${p.id}"]`);
+      if (!card) return;
+      const pnl = p.pnl_usd || 0;
+      const pnlClass = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-zero';
+      const pnlStr = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      const pnlVal = card.querySelector('.pos-card-pnl .pos-card-stat-value');
+      if (pnlVal) {
+        pnlVal.textContent = pnlStr;
+        pnlVal.className = 'pos-card-stat-value ' + pnlClass;
+      }
+    });
+    return;
+  }
+
+  // Track which IDs are new (weren't in previous render)
+  const prevIds = new Set((prev || '').split(',').map((s) => s.split(':')[0]).filter(Boolean));
+
+  // Rebuild DOM
+  const html = all.map((p) => buildPosCard(p)).join('');
+  container.innerHTML = html;
+  container.dataset.posFingerprint = fingerprint;
+
+  // Only animate cards that are genuinely new
+  if (window.Motion) {
+    const newCards = [...container.querySelectorAll('.pos-card')].filter(
+      (el) => !prevIds.has(el.dataset.posId)
+    );
+    if (newCards.length > 0) {
+      Motion.animate(newCards, { opacity: [0, 1], y: [12, 0] }, { duration: 0.35, ease: 'ease-out' });
     }
   }
-
-  setTextWithColor('kpi-drawdown', p.drawdown_pct != null ? '-' + fmtPct(p.drawdown_pct) : '—',
-    p.drawdown_pct > 0.03 ? 'text-red' : p.drawdown_pct > 0.01 ? 'text-amber' : 'text-green');
-  setText('kpi-positions', `${p.active_positions || 0} / 5`);
-
-  // Equity chart
-  renderEquityChart();
-
-  // Platform health
-  renderHealthGrid(snap.platform);
-
-  // Active positions on overview
-  renderOverviewActivePositions(snap.active_positions || []);
-
-  // Recent signals
-  renderOverviewSignals(snap.recent_signals || []);
-
-  // Execution quality
-  renderExecQuality(fm, p, bt);
 }
 
-function renderEquityChart() {
-  const ctx = document.getElementById('chart-equity');
-  if (!ctx) return;
+function buildPosCard(p) {
+  const resolved = p.status === 'closed';
+  const isYes = p.direction === 'BUY_YES';
+  const dirLabel = isYes ? 'Yes' : 'No';
+  const dirClass = isYes ? 'pos-card-direction--yes' : 'pos-card-direction--no';
+  const price = p.fill_price || p.entry_price || 0;
+  const shares = price > 0 ? Math.round(p.size_usd / price) : 0;
+  const pnl = p.pnl_usd || 0;
+  const pnlClass = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-zero';
+  const pnlStr = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
 
-  const data = state.equityCurve.map(p => ({ x: p.t, y: p.v }));
+  // Determine outcome: only count as won if actually filled AND has positive P&L
+  const filled = p.fill_price > 0 && p.filled_at_ms > 0;
+  const won = resolved && filled && pnl > 0;
+  const lost = resolved && filled && pnl < 0;
+  const noFill = resolved && !filled;
 
-  if (!charts.equity) {
-    // Don't create time-scale chart until we have at least 2 data points
-    if (data.length < 2) return;
-    charts.equity = new Chart(ctx, {
-      type: 'line',
-      data: {
-        datasets: [{
-          data: data,
-          borderColor: '#0070f3',
-          borderWidth: 1.5,
-          fill: true,
-          backgroundColor: 'rgba(0, 112, 243, 0.08)',
-          pointRadius: 0,
-          tension: 0.3,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: {
-          x: {
-            type: 'time',
-            grid: { display: false },
-            ticks: { maxTicksLimit: 6, font: { size: 10 } },
-          },
-          y: {
-            grid: { color: 'rgba(255,255,255,0.03)' },
-            ticks: {
-              font: { size: 10 },
-              callback: v => v >= 1000 ? '$' + (v / 1000).toFixed(0) + 'k' : '$' + v.toFixed(2),
-            },
-          },
-        },
-        plugins: { tooltip: { enabled: true, mode: 'index', intersect: false } },
-        interaction: { mode: 'nearest', axis: 'x', intersect: false },
-      },
-    });
+  let cardClass = 'pos-card';
+  if (resolved) {
+    cardClass += ' pos-card--resolved';
+    if (won) cardClass += ' pos-card--win';
+    else if (lost) cardClass += ' pos-card--loss';
+  }
+
+  let badge;
+  if (!resolved) {
+    badge = `<span class="pos-card-badge pos-card-badge--live">Live</span>`;
+  } else if (noFill) {
+    badge = `<span class="pos-card-badge pos-card-badge--nofill">No Fill</span>`;
+  } else if (won) {
+    badge = `<span class="pos-card-badge pos-card-badge--win">Won</span>`;
+  } else if (lost) {
+    badge = `<span class="pos-card-badge pos-card-badge--loss">Lost</span>`;
   } else {
-    charts.equity.data.datasets[0].data = data;
-    charts.equity.update('none');
-  }
-}
-
-function renderHealthGrid(platform) {
-  const el = document.getElementById('health-grid');
-  if (!el || !platform) return;
-
-  const items = [
-    { name: 'Polymarket', up: platform.polymarket_up },
-    { name: 'Binance', up: platform.binance_up },
-    { name: 'Bybit', up: platform.bybit_up },
-    { name: 'OKX', up: platform.okx_up },
-    { name: 'Gas', up: platform.gas_acceptable, detail: platform.gas_gwei ? fmtNum(platform.gas_gwei, 0) + ' gwei' : '' },
-    { name: 'CLOB Latency', up: platform.clob_latency_ms < 2000, detail: platform.clob_latency_ms ? platform.clob_latency_ms + 'ms' : '' },
-  ];
-
-  el.innerHTML = items.map(i => `
-    <div class="health-row">
-      <span class="health-name">${i.name}</span>
-      <span class="health-status">
-        ${i.detail ? `<span class="text-muted text-mono">${i.detail}</span>` : ''}
-        <span class="status-dot ${i.up ? 'status-dot--connected' : 'status-dot--disconnected'}"></span>
-        <span class="${i.up ? 'text-green' : 'text-red'}">${i.up ? 'Healthy' : 'Down'}</span>
-      </span>
-    </div>
-  `).join('');
-}
-
-function renderOverviewActivePositions(positions) {
-  const el = document.getElementById('overview-active-positions');
-  const countEl = document.getElementById('overview-active-count');
-  if (!el) return;
-
-  if (countEl) countEl.textContent = positions.length;
-
-  if (!positions.length) {
-    el.innerHTML = '<div class="empty-state"><p>No active trades</p></div>';
-    return;
+    badge = `<span class="pos-card-badge pos-card-badge--nofill">Break Even</span>`;
   }
 
-  const headers = '<th>Market</th><th>Direction</th><th>Entry</th><th>Fill</th><th class="text-right">Size</th><th class="text-right">P&L</th><th>Age</th>';
-  const rows = positions.map(p => {
-    const dirPill = p.direction === 'BUY_YES' ? 'pill--green' : 'pill--red';
-    const dirLabel = p.direction === 'BUY_YES' ? 'UP' : 'DOWN';
-    const age = p.created_at_ms ? relTime(p.created_at_ms) : '—';
-    return `<tr>
-      <td>${shortMarket(p.market_id)}</td>
-      <td><span class="pill ${dirPill}">${dirLabel}</span></td>
-      <td>${fmtNum(p.entry_price, 4)}</td>
-      <td>${p.fill_price ? fmtNum(p.fill_price, 4) : '—'}</td>
-      <td class="text-right">${fmtCurrency(p.size_usd)}</td>
-      <td class="text-right ${pnlClass(p.pnl_usd)}">${fmtPnl(p.pnl_usd)}</td>
-      <td class="text-muted">${age}</td>
-    </tr>`;
-  }).join('');
-
-  el.innerHTML = `<table class="data-table"><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-function renderOverviewSignals(signals) {
-  const el = document.getElementById('overview-signals');
-  if (!el) return;
-
-  if (!signals.length) {
-    el.innerHTML = '<div class="empty-state"><p>Waiting for signals…</p></div>';
-    return;
-  }
-
-  el.innerHTML = signals.slice(0, 15).map(s => {
-    const isTrade = s.action === 'TRADE';
-    return `
-      <div class="event-row">
-        <span class="event-time">${fmtTimeShort(s.timestamp_ms)}</span>
-        <span class="event-type"><span class="pill ${isTrade ? 'pill--green' : 'pill--gray'}">${s.action}</span></span>
-        <span class="event-detail">${s.market_id || ''} ${s.direction || ''} ${s.edge_pct ? fmtPctRaw(s.edge_pct) + ' edge' : ''}</span>
-      </div>
-    `;
-  }).join('');
-}
-
-function renderExecQuality(fm, p, bt) {
-  const el = document.getElementById('exec-quality');
-  if (!el) return;
-
-  p = p || {};
-  bt = bt || {};
-
-  const totalTrades = bt.total_trades != null ? bt.total_trades : (p.closed_trades || 0);
-  const wins = bt.wins != null ? bt.wins : Math.round(totalTrades * (p.win_rate || 0));
-  const losses = totalTrades - wins;
-  const winRate = bt.win_rate != null ? bt.win_rate : p.win_rate;
-
-  if (!totalTrades && !fm.total_fills) {
-    el.innerHTML = '<div class="empty-state"><p>Waiting for fills…</p></div>';
-    return;
-  }
-
-  el.innerHTML = `
-    <div class="health-grid">
-      <div class="health-row">
-        <span class="health-name">Wins / Losses</span>
-        <span class="health-status text-mono font-medium"><span class="text-green">${wins}W</span> / <span class="text-red">${losses}L</span></span>
-      </div>
-      <div class="health-row">
-        <span class="health-name">Win Rate</span>
-        <span class="health-status text-mono font-medium ${winRate >= 0.7 ? 'text-green' : winRate >= 0.5 ? 'text-amber' : 'text-red'}">${winRate != null ? fmtPct(winRate) : '—'}</span>
-      </div>
-      <div class="health-row">
-        <span class="health-name">Total Trades</span>
-        <span class="health-status text-mono font-medium">${totalTrades}</span>
-      </div>
-      <div class="health-row">
-        <span class="health-name">Fill Rate</span>
-        <span class="health-status text-mono font-medium ${fm.fill_rate >= 0.95 ? 'text-green' : 'text-amber'}">${fm.total_fills ? fmtPct(fm.fill_rate) : '—'}</span>
-      </div>
-      <div class="health-row">
-        <span class="health-name">Avg Slippage</span>
-        <span class="health-status text-mono font-medium ${fm.avg_slippage_bps <= 5 ? 'text-green' : 'text-amber'}">${fm.total_fills ? fmtNum(fm.avg_slippage_bps) + ' bps' : '—'}</span>
+  return `<div class="${cardClass}" data-pos-id="${p.id}">
+    <div class="pos-card-header">
+      <span class="pos-card-market">BTC 5min Up/Down</span>
+      <div class="pos-card-header-right">
+        ${badge}
+        <span class="pos-card-direction ${dirClass}">${dirLabel}</span>
       </div>
     </div>
-  `;
+    <div class="pos-card-row">
+      <div class="pos-card-stat">
+        <span class="pos-card-stat-label">Avg</span>
+        <span class="pos-card-stat-value">${(price * 100).toFixed(0)}\u00a2</span>
+      </div>
+      <div class="pos-card-stat">
+        <span class="pos-card-stat-label">Shares</span>
+        <span class="pos-card-stat-value">${shares}</span>
+      </div>
+      <div class="pos-card-stat">
+        <span class="pos-card-stat-label">Cost</span>
+        <span class="pos-card-stat-value">$${p.size_usd.toFixed(2)}</span>
+      </div>
+      <div class="pos-card-stat pos-card-pnl">
+        <span class="pos-card-stat-label">P&L</span>
+        <span class="pos-card-stat-value ${pnlClass}">${pnlStr}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function timeSince(ms) {
+  const seconds = Math.floor((Date.now() - ms) / 1000);
+  if (seconds < 60) return seconds + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ago';
+  const hours = Math.floor(minutes / 60);
+  return hours + 'h ago';
 }
 
 
