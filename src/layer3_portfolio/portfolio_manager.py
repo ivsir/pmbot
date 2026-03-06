@@ -1,4 +1,4 @@
-"""Portfolio Manager — Max $50K/pos, Max 5 concurrent, Kelly 4.3%, -5% DD limit."""
+"""Portfolio Manager — Max $50K/pos, Max 5 concurrent, Kelly 11.5%, -5% DD limit."""
 
 from __future__ import annotations
 
@@ -89,6 +89,7 @@ class PortfolioManager:
         self._recently_closed: list[Position] = []  # buffer for feedback loop
         self._initial_equity: float = 0.0
         self._peak_equity: float = 0.0
+        self._wallet_balance: float = 0.0  # real on-chain USDC balance
         self._halted = False
 
     async def initialize(self, initial_equity: float) -> None:
@@ -113,8 +114,18 @@ class PortfolioManager:
     def total_exposure_usd(self) -> float:
         return sum(p.size_usd for p in self.active_positions)
 
+    def update_wallet_balance(self, balance: float) -> None:
+        """Update wallet balance from on-chain polling."""
+        self._wallet_balance = balance
+
     @property
     def current_equity(self) -> float:
+        # Use real wallet balance + cost of open positions as equity.
+        # This prevents phantom PnL from resolution/redemption timing gaps.
+        if self._wallet_balance > 0:
+            open_cost = sum(p.size_usd for p in self.active_positions)
+            return self._wallet_balance + open_cost
+        # Fallback before first wallet poll
         unrealized = sum(p.pnl_usd for p in self.active_positions)
         realized = sum(p.pnl_usd for p in self._closed_positions)
         return self._initial_equity + realized + unrealized
@@ -171,7 +182,8 @@ class PortfolioManager:
         return position
 
     async def fill_position(
-        self, position_id: str, fill_price: float, order_id: str
+        self, position_id: str, fill_price: float, order_id: str,
+        filled_size: float = 0.0,
     ) -> None:
         """Mark position as filled."""
         pos = self._positions.get(position_id)
@@ -182,11 +194,18 @@ class PortfolioManager:
         pos.order_id = order_id
         pos.filled_at_ms = int(time.time() * 1000)
 
+        # Update size_usd to actual cost (fill_price × shares) so PnL and
+        # dashboard display reflect real on-chain spend, not Kelly estimate.
+        if filled_size > 0 and fill_price > 0:
+            pos.size_usd = round(fill_price * filled_size, 4)
+
         await self._data_store.set_position(pos.id, pos.to_dict())
         logger.info(
             "portfolio.position_filled",
             id=pos.id,
             fill_price=fill_price,
+            filled_size=filled_size,
+            actual_cost=pos.size_usd,
         )
 
     async def close_position(

@@ -49,6 +49,7 @@ class ResearchOrchestrator:
         self._active_markets: dict[str, float] = {}  # market_id → strike_price
         # State — 5-min Up/Down markets
         self._active_updown_markets: dict[str, dict] = {}  # condition_id → {"start_ms", "end_ms"}
+        self._signaled_windows: set[str] = set()  # condition_ids already signaled this window
         self._callbacks: list[
             Callable[[ResearchOutput], Coroutine[Any, Any, None]]
         ] = []
@@ -143,6 +144,9 @@ class ResearchOrchestrator:
         # Get CEX price history for momentum calculation
         price_history = self._cex.get_price_history(max_age_ms=300_000)
 
+        # Feed candle buffer for ML feature computation
+        self._momentum_detector.update_candle_buffer(cex_tick)
+
         self._tick_count = getattr(self, "_tick_count", 0) + 1
         if self._tick_count % 500 == 1:
             logger.info(
@@ -155,17 +159,24 @@ class ResearchOrchestrator:
 
         now_ms = int(time.time() * 1000)
 
+        # Prune old entries from signaled windows set
+        self._signaled_windows = {
+            cid for cid in self._signaled_windows
+            if cid in self._active_updown_markets
+        }
+
         for condition_id, window in self._active_updown_markets.items():
             ob = self._polymarket.get_cached_orderbook(condition_id)
             if ob is None:
                 continue
 
+            # Skip if we already emitted a signal for this window
+            if condition_id in self._signaled_windows:
+                continue
+
             start_ms = window.get("start_ms", 0)
             end_ms = window.get("end_ms", 0)
 
-            # Trade throughout the active window:
-            #   - Full window: taker orders when momentum edge detected
-            #   - Final 60s:   maker orders (direction ~85% locked)
             secs_until_start = (start_ms - now_ms) / 1000 if start_ms else -999
             secs_until_end = (end_ms - now_ms) / 1000 if end_ms else 0
 
@@ -176,13 +187,22 @@ class ResearchOrchestrator:
 
             secs_into_window = 300 - secs_until_end  # how far into the 5-min window
 
-            # Trade throughout most of the window (first 240s).
-            # Early entries (0-120s) have best prices (near 50¢).
-            # Later entries (120-240s) need latency arb confirmation that
-            # PM hasn't caught up yet — the Bayesian fusion handles this.
-            # Skip final 60s (handled by secs_until_end < 5 above + maker orders).
-            if secs_into_window > 240:
-                continue  # too close to settlement — skip
+            # T+0: trade from window start
+            if secs_into_window < 0:
+                continue
+
+            if secs_into_window > 60:
+                continue  # only trade in first 60s — matches backtest
+
+            # Debug: log when we're in the tradeable window
+            if self._tick_count % 100 == 1:
+                logger.info(
+                    "research.window_active",
+                    market=condition_id[:20],
+                    secs_into=round(secs_into_window),
+                    secs_left=round(secs_until_end),
+                    has_ob=ob is not None,
+                )
 
             # Run agents concurrently
             momentum_sig, latency_sig, liquidity_prof = await asyncio.gather(
@@ -197,6 +217,8 @@ class ResearchOrchestrator:
             )
 
             if output and output.is_actionable:
+                # One signal per window — mark as signaled
+                self._signaled_windows.add(condition_id)
                 # Attach window_end_ms for GTD expiration in execution layer
                 output.window_end_ms = end_ms
                 results.append(output)

@@ -55,8 +55,8 @@ class CEXWebSocketManager:
         self._callbacks: list[Callable[[CEXTick], Coroutine[Any, Any, None]]] = []
         self._running = False
         self._tasks: list[asyncio.Task] = []
-        # Rolling price history for momentum calculation (~5 min at ~2 ticks/sec)
-        self._price_history: deque[CEXTick] = deque(maxlen=600)
+        # Rolling price history for displacement calculation (~5 min at ~6 ticks/sec with 3 feeds)
+        self._price_history: deque[CEXTick] = deque(maxlen=1800)
 
     def on_tick(self, cb: Callable[[CEXTick], Coroutine[Any, Any, None]]) -> None:
         self._callbacks.append(cb)

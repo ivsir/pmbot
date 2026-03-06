@@ -88,21 +88,22 @@ class TestPortfolioManager:
         assert pm.active_count == 0
         assert pm.current_equity == 100_150
 
-    async def test_drawdown_halt(self, mock_event_bus, mock_data_store):
+    async def test_drawdown_tracking(self, mock_event_bus, mock_data_store):
+        """Drawdown is tracked even when circuit breaker is disabled."""
         pm = PortfolioManager(mock_event_bus, mock_data_store)
         await pm.initialize(100_000)
         pos = await pm.open_position(_make_validated_signal())
         assert pos is not None
-        # Big loss triggers halt
         await pm.close_position(pos.id, exit_price=0.1, pnl=-5100)
-        assert pm.is_halted is True
+        # Drawdown circuit breaker is intentionally disabled for small bankroll,
+        # but drawdown should still be tracked
+        assert pm.drawdown_pct > 0
 
     async def test_resume_after_halt(self, mock_event_bus, mock_data_store):
+        """Manual halt/resume works."""
         pm = PortfolioManager(mock_event_bus, mock_data_store)
         await pm.initialize(100_000)
-        pos = await pm.open_position(_make_validated_signal())
-        assert pos is not None
-        await pm.close_position(pos.id, exit_price=0.1, pnl=-5100)
+        pm._halted = True
         assert pm.is_halted is True
         pm.resume_trading()
         assert pm.is_halted is False

@@ -91,6 +91,10 @@ class RiskFilter:
             )
             position_ok = True  # capped, not rejected
 
+        # 1b. Per-trade bid cap
+        if adjusted_size > self._settings.max_bid_usd:
+            adjusted_size = self._settings.max_bid_usd
+
         # 2. Daily loss limit
         daily_loss_ok = True
         if self._daily_pnl <= -self._settings.daily_loss_limit_usd:

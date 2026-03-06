@@ -46,7 +46,7 @@ class ResearchOutput:
 
     @property
     def is_actionable(self) -> bool:
-        return self.combined_probability > 0.6 and self.edge_pct > 2.0
+        return self.edge_pct > 2.0
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -48,9 +48,9 @@ class LiquidityProfile:
     @property
     def max_safe_order_usd(self) -> float:
         """Max order size that won't move price >1%."""
-        # Conservative: use 10% of weaker side depth
+        # 30% of weaker side depth, with $25 floor for small trades
         weaker = min(self.total_bid_depth_usd, self.total_ask_depth_usd)
-        return weaker * 0.10
+        return max(weaker * 0.30, 25.0)
 
 
 class LiquidityScanner:

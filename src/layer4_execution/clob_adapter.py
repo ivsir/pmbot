@@ -405,24 +405,136 @@ class ClobAdapter:
 
     # ── Redemption ──
 
+    # Contract addresses (Polygon mainnet)
+    CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+    USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+    def _encode_redeem_data(self, condition_id: str) -> str:
+        """Encode redeemPositions calldata for the CTF contract."""
+        from web3 import Web3
+        from web3.constants import HASH_ZERO
+
+        w3 = Web3()
+        ctf_addr = w3.to_checksum_address(self.CTF_ADDRESS)
+        usdc_addr = w3.to_checksum_address(self.USDC_ADDRESS)
+
+        redeem_abi = [{
+            "inputs": [
+                {"name": "collateralToken", "type": "address"},
+                {"name": "parentCollectionId", "type": "bytes32"},
+                {"name": "conditionId", "type": "bytes32"},
+                {"name": "indexSets", "type": "uint256[]"},
+            ],
+            "name": "redeemPositions",
+            "outputs": [],
+            "stateMutability": "nonpayable",
+            "type": "function",
+        }]
+        ctf = w3.eth.contract(address=ctf_addr, abi=redeem_abi)
+
+        cid_hex = condition_id[2:] if condition_id.startswith("0x") else condition_id
+        condition_bytes = bytes.fromhex(cid_hex)
+
+        return ctf.encode_abi(
+            "redeemPositions",
+            [usdc_addr, HASH_ZERO, condition_bytes, [1, 2]],
+        )
+
     async def redeem_positions(self, condition_id: str) -> str | None:
         """Redeem winning positions for a resolved market.
 
-        Calls redeemPositions on the CTF contract through the Polymarket
-        proxy wallet. Returns tx hash on success, None on failure.
+        Uses direct web3 via factory (routes through correct proxy wallet).
+        Falls back to gasless relayer if web3 fails.
+        """
+        result = await self._redeem_via_web3(condition_id)
+        if result:
+            return result
+        logger.info("clob_adapter.redeem_web3_failed_trying_relayer", condition_id=condition_id[:20] + "...")
+        return await self._redeem_via_relayer(condition_id)
 
-        Requires:
-        - EOA to have MATIC for gas
-        - Proxy wallet to be initialized with EOA as owner
+    async def _redeem_via_relayer(self, condition_id: str) -> str | None:
+        """Redeem via Polymarket's gasless builder relayer (no gas fees)."""
+        try:
+            from py_builder_relayer_client.client import RelayClient
+            from py_builder_relayer_client.models import SafeTransaction, OperationType
+            from py_builder_signing_sdk.config import BuilderConfig
+            from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+
+            builder_key = self._settings.poly_builder_api_key
+            builder_secret = self._settings.poly_builder_secret
+            builder_pass = self._settings.poly_builder_passphrase
+            pk = self._settings.polygon_private_key
+
+            if not all([builder_key, builder_secret, builder_pass, pk]):
+                logger.debug("clob_adapter.relayer_no_builder_creds")
+                return None
+
+            builder_config = BuilderConfig(
+                local_builder_creds=BuilderApiKeyCreds(
+                    key=builder_key,
+                    secret=builder_secret,
+                    passphrase=builder_pass,
+                )
+            )
+
+            relay_client = RelayClient(
+                "https://relayer-v2.polymarket.com",
+                137,
+                pk,
+                builder_config,
+            )
+
+            redeem_data = self._encode_redeem_data(condition_id)
+
+            redeem_tx = SafeTransaction(
+                to=self.CTF_ADDRESS,
+                operation=OperationType.Call,
+                data=redeem_data,
+                value="0",
+            )
+
+            response = await self._run_sync(
+                relay_client.execute,
+                [redeem_tx],
+                f"Redeem {condition_id[:16]}",
+            )
+
+            result = await self._run_sync(response.wait)
+
+            tx_hash = getattr(response, "transaction_hash", None) or ""
+            logger.info(
+                "clob_adapter.redeem_relayer_success",
+                condition_id=condition_id[:20] + "...",
+                tx_hash=str(tx_hash),
+            )
+            return str(tx_hash) or "relayer_success"
+
+        except Exception as exc:
+            error_str = str(exc)
+            logger.debug(
+                "clob_adapter.redeem_relayer_failed",
+                condition_id=condition_id[:20] + "...",
+                error=error_str,
+            )
+            return None
+
+    # Polymarket Proxy Wallet Factory (Polygon mainnet)
+    # The factory owns the proxy wallets — must call factory.proxy(), not wallet.proxy()
+    FACTORY_ADDRESS = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
+
+    async def _redeem_via_web3(self, condition_id: str) -> str | None:
+        """Redeem via direct web3 transaction through the proxy wallet factory.
+
+        The factory derives the user's proxy wallet from the EOA address via CREATE2
+        and forwards calls through it. Requires POL for gas.
         """
         try:
             from web3 import Web3
-            from web3.constants import HASH_ZERO
 
             rpc_urls = [
-                "https://rpc-mainnet.matic.quiknode.pro",
                 "https://polygon-bor-rpc.publicnode.com",
                 "https://polygon.llamarpc.com",
+                "https://rpc-mainnet.matic.quiknode.pro",
             ]
 
             w3 = None
@@ -441,143 +553,84 @@ class ClobAdapter:
             pk = self._settings.polygon_private_key
             acct = w3.eth.account.from_key(pk)
 
-            # Check EOA has MATIC for gas
-            matic_balance = w3.eth.get_balance(acct.address)
-            if matic_balance < w3.to_wei(0.001, "ether"):
+            pol_balance = w3.eth.get_balance(acct.address)
+            if pol_balance < w3.to_wei(0.01, "ether"):
                 logger.warning(
-                    "clob_adapter.redeem_no_matic",
+                    "clob_adapter.redeem_no_pol",
                     eoa=acct.address,
-                    matic=w3.from_wei(matic_balance, "ether"),
+                    pol=float(w3.from_wei(pol_balance, "ether")),
                 )
                 return None
 
-            funder = self._settings.poly_funder_address
-            if not funder:
-                return None
+            ctf_addr = w3.to_checksum_address(self.CTF_ADDRESS)
+            factory_addr = w3.to_checksum_address(self.FACTORY_ADDRESS)
+            redeem_data = self._encode_redeem_data(condition_id)
 
-            proxy_addr = w3.to_checksum_address(funder)
-            ctf_addr = w3.to_checksum_address(
-                "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-            )
-            usdc_addr = w3.to_checksum_address(
-                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            )
-
-            # Encode redeemPositions call on CTF
-            redeem_abi = [
-                {
-                    "inputs": [
-                        {"name": "collateralToken", "type": "address"},
-                        {"name": "parentCollectionId", "type": "bytes32"},
-                        {"name": "conditionId", "type": "bytes32"},
-                        {"name": "indexSets", "type": "uint256[]"},
+            # Factory ABI — proxy() forwards calls through the user's proxy wallet
+            # ProxyCall struct: { typeCode: uint8, to: address, value: uint256, data: bytes }
+            # typeCode: 0=INVALID, 1=CALL, 2=DELEGATECALL
+            factory_abi = [{
+                "inputs": [{
+                    "components": [
+                        {"name": "typeCode", "type": "uint8"},
+                        {"name": "to", "type": "address"},
+                        {"name": "value", "type": "uint256"},
+                        {"name": "data", "type": "bytes"},
                     ],
-                    "name": "redeemPositions",
-                    "outputs": [],
-                    "stateMutability": "nonpayable",
-                    "type": "function",
-                }
-            ]
-            ctf = w3.eth.contract(address=ctf_addr, abi=redeem_abi)
+                    "name": "calls",
+                    "type": "tuple[]",
+                }],
+                "name": "proxy",
+                "outputs": [{"name": "returnValues", "type": "bytes[]"}],
+                "stateMutability": "payable",
+                "type": "function",
+            }]
+            factory = w3.eth.contract(address=factory_addr, abi=factory_abi)
 
-            # Convert condition_id hex string to bytes32
-            cid_hex = condition_id
-            if cid_hex.startswith("0x"):
-                cid_hex = cid_hex[2:]
-            condition_bytes = bytes.fromhex(cid_hex)
+            # typeCode=1 (CALL), target=CTF, value=0, data=redeemPositions calldata
+            calls = [(1, ctf_addr, 0, bytes.fromhex(redeem_data[2:]))]
 
-            redeem_data = ctf.encode_abi(
-                "redeemPositions",
-                [usdc_addr, HASH_ZERO, condition_bytes, [1, 2]],
-            )
-
-            # Call through Polymarket proxy wallet
-            proxy_abi = [
-                {
-                    "inputs": [
-                        {
-                            "components": [
-                                {"name": "callType", "type": "uint8"},
-                                {"name": "target", "type": "address"},
-                                {"name": "value", "type": "uint256"},
-                                {"name": "data", "type": "bytes"},
-                            ],
-                            "name": "calls",
-                            "type": "tuple[]",
-                        }
-                    ],
-                    "name": "proxy",
-                    "outputs": [{"name": "returnValues", "type": "bytes[]"}],
-                    "stateMutability": "payable",
-                    "type": "function",
-                }
-            ]
-            proxy = w3.eth.contract(address=proxy_addr, abi=proxy_abi)
-
-            # callType 0 = CALL
-            calls = [(0, ctf_addr, 0, bytes.fromhex(redeem_data[2:]))]
-
-            # Try to initialize proxy first (no-op if already initialized)
-            init_abi = [
-                {
-                    "inputs": [],
-                    "name": "initialize",
-                    "outputs": [],
-                    "stateMutability": "nonpayable",
-                    "type": "function",
-                }
-            ]
-            init_contract = w3.eth.contract(address=proxy_addr, abi=init_abi)
-            try:
-                init_tx = init_contract.functions.initialize().build_transaction(
-                    {
-                        "from": acct.address,
-                        "nonce": w3.eth.get_transaction_count(acct.address),
-                        "gas": 100_000,
-                        "maxFeePerGas": w3.eth.gas_price * 2,
-                        "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
-                    }
-                )
-                signed_init = w3.eth.account.sign_transaction(init_tx, pk)
-                init_hash = w3.eth.send_raw_transaction(signed_init.raw_transaction)
-                w3.eth.wait_for_transaction_receipt(init_hash, timeout=30)
-                logger.info("clob_adapter.proxy_initialized", tx=init_hash.hex())
-            except Exception:
-                pass  # Already initialized — that's fine
-
-            # Build and send the redeem transaction
-            nonce = w3.eth.get_transaction_count(acct.address)
-            tx = proxy.functions.proxy(calls).build_transaction(
-                {
-                    "from": acct.address,
-                    "nonce": nonce,
-                    "gas": 300_000,
-                    "maxFeePerGas": w3.eth.gas_price * 2,
-                    "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
-                }
-            )
+            nonce = w3.eth.get_transaction_count(acct.address, "pending")
+            gas_price = w3.eth.gas_price
+            tx = factory.functions.proxy(calls).build_transaction({
+                "from": acct.address,
+                "nonce": nonce,
+                "gas": 350_000,
+                "maxFeePerGas": gas_price * 2,
+                "maxPriorityFeePerGas": w3.to_wei(35, "gwei"),
+            })
             signed = w3.eth.account.sign_transaction(tx, pk)
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+            logger.info(
+                "clob_adapter.redeem_web3_submitted",
+                condition_id=condition_id[:20] + "...",
+                tx_hash=tx_hash.hex(),
+                eoa=acct.address,
+            )
+
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
 
             if receipt["status"] == 1:
                 logger.info(
-                    "clob_adapter.redeem_success",
+                    "clob_adapter.redeem_web3_success",
                     condition_id=condition_id[:20] + "...",
                     tx_hash=tx_hash.hex(),
+                    gas_used=receipt["gasUsed"],
                 )
                 return tx_hash.hex()
             else:
                 logger.warning(
-                    "clob_adapter.redeem_reverted",
+                    "clob_adapter.redeem_web3_reverted",
                     condition_id=condition_id[:20] + "...",
                     tx_hash=tx_hash.hex(),
+                    gas_used=receipt["gasUsed"],
                 )
                 return None
 
         except Exception as exc:
-            logger.debug(
-                "clob_adapter.redeem_failed",
+            logger.error(
+                "clob_adapter.redeem_web3_failed",
                 condition_id=condition_id[:20] + "..." if condition_id else "",
                 error=str(exc),
             )

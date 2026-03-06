@@ -409,47 +409,116 @@ class PolymarketClient:
             return tokens[1] if len(tokens) > 1 else None
         return tokens[0] if tokens else None
 
-    async def check_market_resolution(self, condition_id: str) -> dict[str, Any] | None:
+    async def check_market_resolution(
+        self, condition_id: str, window_start_ms: int = 0
+    ) -> dict[str, Any] | None:
         """Check if a market has resolved and which outcome won.
 
         Returns dict with {resolved, winner_token, winning_outcome} or None on error.
-        Uses the CLOB get_market endpoint which returns tokens[].winner field.
+        Tries CLOB API first, then gamma API slug for 5-min markets (CLOB drops
+        resolved 5-min markets from its API, returning 404).
         """
-        if not self._clob_adapter:
-            return None
-        try:
-            market = await self._clob_adapter._run_sync(
-                self._clob_adapter.client.get_market, condition_id
-            )
-            if not isinstance(market, dict):
-                return None
+        # Try CLOB API first (works for active/recently-closed markets)
+        if self._clob_adapter:
+            try:
+                market = await self._clob_adapter._run_sync(
+                    self._clob_adapter.client.get_market, condition_id
+                )
+                if isinstance(market, dict):
+                    is_closed = market.get("closed", False)
+                    if not is_closed:
+                        pass  # fall through to gamma check
+                    else:
+                        tokens = market.get("tokens", [])
+                        for t in tokens:
+                            if t.get("winner", False):
+                                return {
+                                    "resolved": True,
+                                    "winner_token": t.get("token_id", ""),
+                                    "winning_outcome": t.get("outcome", ""),
+                                }
+                        return {"resolved": False}
+            except Exception as exc:
+                logger.debug("polymarket.clob_resolution_failed", error=str(exc))
 
-            is_closed = market.get("closed", False)
-            if not is_closed:
+        # Gamma API fallback for 5-min markets (CLOB returns 404 after close)
+        if window_start_ms > 0 and self._session:
+            return await self._check_resolution_gamma(condition_id, window_start_ms)
+
+        return {"resolved": False}
+
+    async def _check_resolution_gamma(
+        self, condition_id: str, window_start_ms: int
+    ) -> dict[str, Any] | None:
+        """Check resolution via gamma API slug endpoint.
+
+        5-min BTC Up/Down markets use deterministic slugs: btc-updown-5m-{unix_ts}
+        The gamma API retains these after resolution, unlike the CLOB API.
+        """
+        window_ts = window_start_ms // 1000
+        slug = f"btc-updown-5m-{window_ts}"
+        try:
+            url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
+            async with self._session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status != 200:
+                    return {"resolved": False}
+                event = await resp.json()
+
+            if not isinstance(event, dict):
                 return {"resolved": False}
 
-            tokens = market.get("tokens", [])
-            for t in tokens:
-                if t.get("winner", False):
-                    return {
-                        "resolved": True,
-                        "winner_token": t.get("token_id", ""),
-                        "winning_outcome": t.get("outcome", ""),
-                    }
+            for market in event.get("markets", []):
+                mkt_cid = market.get("conditionId", "")
+                if mkt_cid != condition_id:
+                    continue
 
-            # Market closed but no winner yet (still resolving)
+                if not market.get("closed", False):
+                    return {"resolved": False}
+
+                # outcomePrices is a JSON string: '["1","0"]' means Up won
+                outcome_prices = market.get("outcomePrices", "[]")
+                if isinstance(outcome_prices, str):
+                    import json
+                    try:
+                        outcome_prices = json.loads(outcome_prices)
+                    except (json.JSONDecodeError, TypeError):
+                        outcome_prices = []
+                if len(outcome_prices) >= 2:
+                    if outcome_prices[0] == "1":
+                        return {
+                            "resolved": True,
+                            "winner_token": "",
+                            "winning_outcome": "Up",
+                        }
+                    elif outcome_prices[1] == "1":
+                        return {
+                            "resolved": True,
+                            "winner_token": "",
+                            "winning_outcome": "Down",
+                        }
+
+                return {"resolved": False}
+
+            # condition_id not found in event — try matching any closed market
             return {"resolved": False}
+
         except Exception as exc:
-            logger.debug("polymarket.resolution_check_failed", error=str(exc))
-            return None
+            logger.debug(
+                "polymarket.gamma_resolution_failed",
+                slug=slug,
+                error=str(exc),
+            )
+            return {"resolved": False}
 
     async def fetch_redeemable_positions(self) -> list[dict]:
-        """Fetch positions that are ready to claim via Gamma API."""
+        """Fetch positions that are ready to claim via Data API."""
         if not self._session or not self._settings.poly_funder_address:
             return []
         try:
             url = (
-                f"https://gamma-api.polymarket.com/positions"
+                f"https://data-api.polymarket.com/positions"
                 f"?user={self._settings.poly_funder_address}"
                 f"&redeemable=true&limit=100"
             )
@@ -458,10 +527,13 @@ class PolymarketClient:
                     return []
                 data = await resp.json()
                 if isinstance(data, list) and data:
-                    logger.info(
-                        "polymarket.redeemable_found",
-                        count=len(data),
-                    )
+                    winners = sum(1 for p in data if float(p.get("curPrice", 0) or 0) > 0)
+                    if winners > 0:
+                        logger.info(
+                            "polymarket.redeemable_found",
+                            total=len(data),
+                            winners=winners,
+                        )
                 return data if isinstance(data, list) else []
         except Exception as exc:
             logger.debug("polymarket.redeemable_check_failed", error=str(exc))

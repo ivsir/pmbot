@@ -77,11 +77,11 @@ class TestAlphaSignalGenerator:
         assert signal.entry is False
 
     def test_kelly_capped(self):
-        """Kelly fraction should never exceed the configured cap (4.3%)."""
+        """Kelly fraction should never exceed the configured cap."""
         gen = AlphaSignalGenerator()
         research = _make_research(combined_prob=0.95, edge_pct=10.0)
         signal = gen.generate(research)
-        assert signal.kelly_fraction <= 0.043
+        assert signal.kelly_fraction <= gen._kelly_cap
 
     def test_expected_profit_positive(self):
         """Entry signals should have positive expected profit."""

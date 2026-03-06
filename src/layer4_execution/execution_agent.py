@@ -213,8 +213,12 @@ class ExecutionAgent:
                 secs_until_end=secs_until_end,
             )
         else:
-            # Standard taker order
-            urgency = min(signal.signal.win_probability, 0.95)
+            # For 5min_updown: always cross the spread (taker) for instant fills.
+            # Edge decays in milliseconds — sitting on the book loses money.
+            if self._settings.market_mode == "5min_updown":
+                urgency = 0.95  # forces MARKET strategy in sniper
+            else:
+                urgency = min(signal.signal.win_probability, 0.95)
             sniper_order = self._sniper.compute_optimal_order(
                 orderbook=ob,
                 side=side,
@@ -255,16 +259,22 @@ class ExecutionAgent:
             )
 
             # Step 7: Wait for fill
-            # Maker orders need longer wait (sit on book until settlement)
-            maker_wait_ms = 30_000 if use_maker else None
-            fill = await self._wait_for_fill(order_id, sniper_order, max_wait_override_ms=maker_wait_ms)
+            # 5min_updown orders need longer wait — thin books may take time to match
+            if use_maker:
+                wait_ms = 30_000  # maker: sit on book until settlement
+            elif self._settings.market_mode == "5min_updown":
+                wait_ms = 30_000  # taker: give thin books more time
+            else:
+                wait_ms = None  # use default MAX_FILL_WAIT_MS
+            fill = await self._wait_for_fill(order_id, sniper_order, max_wait_override_ms=wait_ms)
 
             execution_time = int(time.time() * 1000) - start_ms
 
             if fill and fill.status == FillStatus.FILLED:
-                # Update portfolio
+                # Update portfolio (pass filled_size so size_usd reflects actual cost)
                 await self._portfolio.fill_position(
-                    position.id, fill.fill_price, order_id
+                    position.id, fill.fill_price, order_id,
+                    filled_size=fill.filled_size,
                 )
 
                 result = ExecutionResult(
@@ -376,7 +386,7 @@ class ExecutionAgent:
             )
 
         # Live mode: poll order status from CLOB
-        poll_interval_ms = 250
+        poll_interval_ms = 100  # 100ms for faster fill detection
         max_wait_ms = max_wait_override_ms or self._fill_monitor.MAX_FILL_WAIT_MS
         elapsed_ms = 0
 

@@ -73,7 +73,13 @@ class ArbitrageSystem:
         )
 
         # Layer 2
-        self._signal_validator = SignalValidator(event_bus=self._event_bus)
+        from src.layer2_signal.alpha_signal import AlphaSignalGenerator
+        alpha_gen = AlphaSignalGenerator(
+            wallet_balance_fn=lambda: self._polymarket.wallet_balance
+        )
+        self._signal_validator = SignalValidator(
+            event_bus=self._event_bus, alpha_gen=alpha_gen
+        )
 
         # Layer 3
         self._portfolio = PortfolioManager(
@@ -423,9 +429,12 @@ class ArbitrageSystem:
 
                     market_id = pos.market_id
 
-                    # Failsafe: force-close any position older than 10 min
-                    # (5-min markets should always be resolved by then)
-                    if age_s > 600:
+                    # Failsafe: force-close any position older than 15 min.
+                    # 5-min markets: trade at T+1, window ends T+5, on-chain
+                    # resolution takes 5-8 min → total ~13 min max.
+                    # Old 600s timer was too short, causing filled positions
+                    # to be closed as pnl=0 before resolution arrived.
+                    if age_s > 900:
                         logger.info(
                             "system.force_closing_stale",
                             position_id=pos_id[:16],
@@ -433,8 +442,9 @@ class ArbitrageSystem:
                             market_id=market_id[:20] + "...",
                         )
                         # Try to get resolution for PnL accuracy
+                        stale_window_start_ms = (pos.created_at_ms // 300_000) * 300_000
                         resolution = await self._polymarket.check_market_resolution(
-                            market_id
+                            market_id, window_start_ms=stale_window_start_ms
                         )
                         if resolution and resolution.get("resolved"):
                             winning_outcome = resolution.get("winning_outcome", "")
@@ -451,9 +461,24 @@ class ArbitrageSystem:
                                 pnl = -pos.size_usd
                                 exit_price = 0.0
                         else:
-                            # Can't determine — assume break-even
-                            pnl = 0.0
-                            exit_price = pos.fill_price or pos.entry_price
+                            # Can't determine outcome. For filled positions,
+                            # USDC was already spent — record as loss so PnL
+                            # tracking doesn't hide real losses as "break-even".
+                            # If tokens later win, redemption adds USDC back
+                            # to wallet (tracked by wallet-based equity).
+                            if pos.fill_price > 0:
+                                pnl = -pos.size_usd
+                                exit_price = 0.0
+                                logger.warning(
+                                    "system.stale_filled_unresolved",
+                                    position_id=pos_id[:16],
+                                    cost=pos.size_usd,
+                                    age_s=round(age_s),
+                                )
+                            else:
+                                # Unfilled — no money spent
+                                pnl = 0.0
+                                exit_price = 0.0
 
                         try:
                             await self._portfolio.close_position(
@@ -473,8 +498,11 @@ class ArbitrageSystem:
                         continue
 
                     # Normal resolution check
+                    # Derive window_start_ms for gamma API fallback
+                    # (CLOB API drops resolved 5-min markets)
+                    window_start_ms = (pos.created_at_ms // 300_000) * 300_000
                     resolution = await self._polymarket.check_market_resolution(
-                        market_id
+                        market_id, window_start_ms=window_start_ms
                     )
 
                     logger.info(
@@ -536,6 +564,24 @@ class ArbitrageSystem:
                             error=str(close_exc),
                         )
 
+                    # Immediately redeem winning positions (don't wait for data-api scan)
+                    if won and self._settings.live_trading_enabled:
+                        try:
+                            tx = await self._polymarket.redeem_winning_position(market_id)
+                            if tx:
+                                logger.info(
+                                    "system.immediate_redeem_success",
+                                    condition_id=market_id[:20] + "...",
+                                    tx_hash=tx,
+                                )
+                                await self._polymarket.check_wallet_balance()
+                        except Exception as redeem_exc:
+                            logger.debug(
+                                "system.immediate_redeem_failed",
+                                condition_id=market_id[:20] + "...",
+                                error=str(redeem_exc),
+                            )
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -560,7 +606,16 @@ class ArbitrageSystem:
                 if not positions:
                     continue
 
-                for pos in positions:
+                # Filter to only winning positions ($0 positions waste gas)
+                winners = [
+                    p for p in positions
+                    if float(p.get("curPrice", 0) or 0) > 0
+                    and float(p.get("currentValue", 0) or 0) > 0
+                ]
+                if not winners:
+                    continue
+
+                for pos in winners:
                     condition_id = pos.get("conditionId", pos.get("condition_id", ""))
                     if not condition_id or condition_id in redeemed:
                         continue
@@ -606,13 +661,15 @@ class ArbitrageSystem:
         while self._running:
             try:
                 balance = await self._polymarket.check_wallet_balance()
-                # Update portfolio equity to match wallet
-                if balance > 0 and self._portfolio._initial_equity == 0:
-                    await self._portfolio.initialize(initial_equity=balance)
-                    logger.info(
-                        "system.equity_updated_from_wallet",
-                        balance_usd=round(balance, 2),
-                    )
+                # Sync portfolio equity to real wallet balance
+                if balance > 0:
+                    self._portfolio.update_wallet_balance(balance)
+                    if self._portfolio._initial_equity == 0:
+                        await self._portfolio.initialize(initial_equity=balance)
+                        logger.info(
+                            "system.equity_updated_from_wallet",
+                            balance_usd=round(balance, 2),
+                        )
             except Exception as exc:
                 logger.debug("system.balance_poll_error", error=str(exc))
             await asyncio.sleep(30)  # check every 30 seconds

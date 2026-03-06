@@ -254,7 +254,7 @@ def analyze_results(results: list[WindowResult]):
     # Simulate P&L (buy at ~$0.50 implied, win pays $1, lose pays $0)
     # More realistic: buy at fair_up_prob price
     total_pnl = 0
-    trade_size = 4.30  # matching bot's Kelly size
+    trade_size = 9.20  # matching bot's Kelly size (11.5% of $80 bankroll)
     for r in results:
         if r.predicted_direction == "UP":
             entry_price = r.fair_up_prob  # buy Up token

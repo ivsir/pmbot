@@ -57,15 +57,26 @@ class AlphaSignalGenerator:
     where p = win probability, q = 1-p, b = net odds (payout ratio)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, wallet_balance_fn=None) -> None:
         self._settings = get_settings()
-        self._kelly_cap = self._settings.kelly_fraction  # 4.3%
+        self._kelly_cap = self._settings.kelly_fraction
         self._max_position = self._settings.max_position_usd
+        self._wallet_balance_fn = wallet_balance_fn
         self._signals: list[AlphaSignal] = []
 
     def generate(self, research: ResearchOutput) -> AlphaSignal:
         """Generate an alpha signal from research output."""
-        win_prob = research.combined_probability
+        # Use fair probability directly — Bayesian combined_probability dampens
+        # displacement signal (~0.63 → 0.50), making Kelly=0.
+        # MomentumSignal has .fair_up_prob; SpreadOpportunity has .fair_prob.
+        raw_prob = None
+        if research.spread_opp:
+            raw_prob = getattr(research.spread_opp, 'fair_up_prob', None) \
+                    or getattr(research.spread_opp, 'fair_prob', None)
+        if raw_prob is not None:
+            win_prob = raw_prob if research.direction == "BUY_YES" else 1.0 - raw_prob
+        else:
+            win_prob = research.combined_probability
         edge_pct = research.edge_pct
 
         # Entry price: use market price for Kelly sizing.
@@ -91,9 +102,16 @@ class AlphaSignalGenerator:
         # Cap Kelly fraction (fractional Kelly for safety)
         kelly_fraction = min(kelly_raw, self._kelly_cap)
 
-        # Optimal size
-        bankroll = self._max_position  # treat max position as bankroll per trade
-        optimal_size = bankroll * kelly_fraction
+        # Optimal size: Kelly fraction of wallet (proportional to edge)
+        bankroll = self._max_position
+        if self._wallet_balance_fn:
+            try:
+                live_balance = self._wallet_balance_fn()
+                if live_balance and live_balance > 0:
+                    bankroll = live_balance
+            except Exception:
+                pass
+        optimal_size = max(bankroll * kelly_fraction, 0.10)
 
         # Respect max safe order from liquidity analysis
         if research.max_safe_size_usd > 0:
@@ -102,17 +120,17 @@ class AlphaSignalGenerator:
         # Expected profit
         expected_profit = optimal_size * payout_ratio * win_prob - optimal_size * q
 
-        # PM price quality filter: only enter when our token is priced 20-80¢.
-        # Below 20¢ means the market strongly disagrees with us (bad EV).
+        # PM price quality filter: only enter when our token is priced 5-80¢.
+        # Below 5¢ means extreme disagreement (likely bad signal).
         # Above 80¢ means the market already agrees (no edge left).
-        price_quality_ok = 0.20 <= entry_price <= 0.80
+        price_quality_ok = 0.05 <= entry_price <= 0.80
 
-        # Entry decision
+        # Entry decision — Kelly is the gatekeeper for positive EV.
+        # Size is capped by MAX_BID_USD in risk_filter, so no overbet guard needed.
         entry = (
             kelly_fraction > 0.005  # minimum kelly threshold
             and edge_pct >= self._settings.min_edge_pct * 100
-            and win_prob >= self._settings.min_confidence
-            and optimal_size >= 1  # minimum $1 trade (Polymarket minimum is $1)
+            and optimal_size >= 0.10  # minimum $0.10 trade
             and price_quality_ok  # PM price in acceptable range
         )
 

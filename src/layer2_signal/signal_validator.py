@@ -101,12 +101,11 @@ class SignalValidator:
         if alpha.edge_pct < self._settings.min_edge_pct * 100:
             return self._skip(alpha, f"Edge {alpha.edge_pct:.2f}% below {self._settings.min_edge_pct * 100}% threshold")
 
-        # Step 4: Confidence threshold check
-        if alpha.win_probability < self._settings.min_confidence:
-            return self._skip(
-                alpha,
-                f"Confidence {alpha.win_probability:.2%} below {self._settings.min_confidence:.0%} threshold",
-            )
+        # Step 4: Confidence threshold — REMOVED.
+        # Kelly criterion (step 2 via alpha.entry) already gates for +EV.
+        # The old confidence check blocked valid trades where we buy the
+        # underpriced side (e.g., BUY_NO when BTC is up but PM overprices UP).
+        # win_prob=39% at 30¢ entry → Kelly=12%, clearly +EV.
 
         # Step 5: Risk filter
         risk = self._risk_filter.assess(alpha)
