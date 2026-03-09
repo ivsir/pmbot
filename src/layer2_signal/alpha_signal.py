@@ -59,7 +59,8 @@ class AlphaSignalGenerator:
 
     def __init__(self, wallet_balance_fn=None) -> None:
         self._settings = get_settings()
-        self._kelly_cap = self._settings.kelly_fraction
+        self._kelly_min = self._settings.kelly_fraction
+        self._kelly_cap = getattr(self._settings, 'kelly_fraction_max', self._settings.kelly_fraction)
         self._max_position = self._settings.max_position_usd
         self._wallet_balance_fn = wallet_balance_fn
         self._signals: list[AlphaSignal] = []
@@ -99,8 +100,8 @@ class AlphaSignalGenerator:
         kelly_raw = (win_prob * payout_ratio - q) / payout_ratio
         kelly_raw = max(0.0, kelly_raw)
 
-        # Cap Kelly fraction (fractional Kelly for safety)
-        kelly_fraction = min(kelly_raw, self._kelly_cap)
+        # Clamp Kelly fraction to [min, max] range
+        kelly_fraction = max(min(kelly_raw, self._kelly_cap), self._kelly_min) if kelly_raw > 0.005 else kelly_raw
 
         # Optimal size: Kelly fraction of wallet (proportional to edge)
         bankroll = self._max_position

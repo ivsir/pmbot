@@ -73,13 +73,14 @@ class Settings(BaseSettings):
 
     # ── Risk Controls ──
     max_position_usd: float = Field(default=50_000.0)
-    bankroll_usd: float = Field(default=80.0)  # Kelly bankroll for position sizing
-    max_bid_usd: float = Field(default=5.00)  # Per-trade maximum bid size
+    bankroll_usd: float = Field(default=10.0)  # Kelly bankroll for position sizing
+    max_bid_usd: float = Field(default=1.00)  # Per-trade maximum bid size
     max_concurrent_positions: int = Field(default=5)
     daily_loss_limit_usd: float = Field(default=2_000.0)
     correlation_threshold: float = Field(default=0.7)
     liquidity_minimum_usd: float = Field(default=10_000.0)
-    kelly_fraction: float = Field(default=0.115)
+    kelly_fraction: float = Field(default=0.115)  # min Kelly fraction
+    kelly_fraction_max: float = Field(default=0.15)  # max Kelly fraction
     max_drawdown_pct: float = Field(default=1.0)  # Disabled for small bankroll testing
     min_edge_pct: float = Field(default=0.02)
     min_confidence: float = Field(default=0.50)

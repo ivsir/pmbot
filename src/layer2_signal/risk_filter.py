@@ -91,10 +91,6 @@ class RiskFilter:
             )
             position_ok = True  # capped, not rejected
 
-        # 1b. Per-trade bid cap
-        if adjusted_size > self._settings.max_bid_usd:
-            adjusted_size = self._settings.max_bid_usd
-
         # 2. Daily loss limit
         daily_loss_ok = True
         if self._daily_pnl <= -self._settings.daily_loss_limit_usd:
@@ -108,13 +104,8 @@ class RiskFilter:
         if not correlation_ok:
             reasons.append("High correlation with existing position")
 
-        # 4. Drawdown check
+        # 4. Drawdown check — DISABLED
         drawdown_ok = True
-        if self._peak_equity > 0:
-            dd = (self._peak_equity - self._current_equity) / self._peak_equity
-            if dd >= self._settings.max_drawdown_pct:
-                drawdown_ok = False
-                reasons.append(f"Drawdown {dd:.2%} exceeds limit")
 
         # 5. Concentration — max concurrent positions
         concentration_ok = (

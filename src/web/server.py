@@ -384,6 +384,10 @@ def create_app(system: Any) -> FastAPI:
 async def start_server(
     app: FastAPI, host: str = "0.0.0.0", port: int = 8080
 ) -> None:
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    await server.serve()
+    try:
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+    except (OSError, SystemExit) as exc:
+        import structlog
+        structlog.get_logger().warning("dashboard.port_unavailable", port=port, error=str(exc))

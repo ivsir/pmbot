@@ -1,290 +1,340 @@
 #!/usr/bin/env python3
-"""Backtest comparison: ML model vs sigmoid on held-out data.
+"""Backtest: ML model vs Sigmoid on 3 months of Binance data.
 
-Runs both models on the same 5-min windows with realistic PM simulation
-and Kelly sizing. Compares WR, calibration, P&L, and trade selection.
+Simulates realistic Polymarket 5-min Up/Down trading:
+  - Entry at T+60s into each 5-min window
+  - Uses displacement from window open price
+  - Applies velocity, vol-normalization, and min-edge filters
+  - Simulates PM entry prices based on displacement (mid ~50c +/- edge)
+  - Tracks P&L with realistic binary payouts
 
 Usage:
-    python scripts/backtest_ml_vs_sigmoid.py [--months 2] [--model models/displacement_model.joblib]
+    python scripts/backtest_ml_vs_sigmoid.py [--months 3]
 """
 
-import argparse
 import math
 import os
 import sys
 import time
 
 import numpy as np
-import requests
-import joblib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.layer1_research.feature_engine import FeatureEngine, FEATURE_NAMES, N_FEATURES
+from scripts.train_displacement_model import fetch_binance_klines, parse_klines, Candle
 
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-
-SIGMOID_SCALE = 10.0
-MIN_DISPLACEMENT_PCT = 0.03
-KELLY_CAP = 0.115
-MIN_EDGE_PCT = 2.0
-PM_EFFICIENCY = 0.40
-BANKROLL = 100.0
+def sigmoid(x, scale=10.0):
+    return 1.0 / (1.0 + math.exp(-scale * x))
 
 
-# ─── Data ─────────────────────────────────────────────────────────────────────
+def run_backtest(candles, candle_map, model=None, label="Sigmoid", scale=10.0,
+                 min_displacement=0.02, min_edge_pct=0.02, bet_size=5.0):
+    """Run backtest over all 5-min windows.
 
-def fetch_binance_klines(symbol, interval, start_ms, end_ms):
-    url = "https://api.binance.com/api/v3/klines"
-    all_klines = []
-    current_start = start_ms
-    while current_start < end_ms:
-        params = {"symbol": symbol, "interval": interval,
-                  "startTime": current_start, "endTime": end_ms, "limit": 1000}
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
-        all_klines.extend(batch)
-        current_start = batch[-1][0] + 60_000
-        if len(batch) < 1000:
-            break
-        time.sleep(0.15)
-    return all_klines
+    Returns dict of results.
+    """
+    first_ms = candles[0].open_time_ms
+    last_ms = candles[-1].open_time_ms
+    window_interval = 5 * 60 * 1000
+    first_window = (first_ms // window_interval + 1) * window_interval
 
+    # Need 60 candles of warmup for features
+    first_window = max(first_window, first_ms + 60 * 60 * 1000)
 
-class Candle:
-    __slots__ = ("open_time_ms", "open", "high", "low", "close", "volume")
-    def __init__(self, k):
-        self.open_time_ms = k[0]
-        self.open = float(k[1])
-        self.high = float(k[2])
-        self.low = float(k[3])
-        self.close = float(k[4])
-        self.volume = float(k[5])
+    trades = []
+    t = first_window
 
+    while t + window_interval <= last_ms:
+        entry_time_ms = t + 60 * 1000  # T+60s
+        resolve_time_ms = t + 300_000
 
-# ─── Simulation ───────────────────────────────────────────────────────────────
+        window_open_candle = candle_map.get(t)
+        entry_candle = candle_map.get(entry_time_ms)
+        resolve_candle = candle_map.get(resolve_time_ms)
 
-def simulate_pm_mid(fair_up_prob, efficiency=PM_EFFICIENCY):
-    noise = np.random.normal(0, 0.02)
-    pm_mid = 0.50 + efficiency * (fair_up_prob - 0.50) + noise
-    return float(np.clip(pm_mid, 0.05, 0.95))
-
-
-def kelly_sizing(win_prob, entry_price):
-    if entry_price <= 0 or entry_price >= 1:
-        return 0.0, 0.0
-    payout = (1.0 / entry_price) - 1.0
-    q = 1.0 - win_prob
-    kelly = (win_prob * payout - q) / payout
-    kelly = max(0.0, min(kelly, KELLY_CAP))
-    return kelly, payout
-
-
-def run_backtest(candle_map, windows, model, entry_offset_s=60):
-    """Run both ML and sigmoid on windows, return results dicts."""
-    results = {"ml": [], "sigmoid": []}
-
-    for ws_ms in windows:
-        entry_ms = ws_ms + entry_offset_s * 1000
-        resolve_ms = ws_ms + 300_000
-
-        woc = candle_map.get(ws_ms)
-        rc = candle_map.get(resolve_ms)
-        ec = candle_map.get(entry_ms)
-        if not woc or not rc or not ec:
+        if not window_open_candle or not entry_candle or not resolve_candle:
+            t += window_interval
             continue
 
-        window_open = woc.open
-        entry_price_btc = ec.close
-        if window_open <= 0:
-            continue
+        window_open_price = window_open_candle.open
+        entry_price_btc = entry_candle.close
 
-        displacement_pct = (entry_price_btc - window_open) / window_open * 100
-        outcome_up = rc.close > window_open
+        # Displacement at entry
+        displacement_pct = (entry_price_btc - window_open_price) / window_open_price * 100
 
         # Skip noise
-        if abs(displacement_pct) < MIN_DISPLACEMENT_PCT:
+        if abs(displacement_pct) < min_displacement:
+            t += window_interval
             continue
 
-        # Compute features for ML
-        features = FeatureEngine.compute_from_candles(
-            candle_map=candle_map,
-            window_start_ms=ws_ms,
-            entry_time_ms=entry_ms,
-        )
-
-        # ── Sigmoid model ──
-        sig_prob = 1.0 / (1.0 + math.exp(-SIGMOID_SCALE * displacement_pct))
-        sig_prob = max(0.01, min(0.99, sig_prob))
-        sig_dir = "BUY_YES" if displacement_pct > 0 else "BUY_NO"
-        sig_win_prob = sig_prob if sig_dir == "BUY_YES" else 1.0 - sig_prob
-
-        # ── ML model ──
-        if features is not None:
-            X = np.nan_to_num(features.reshape(1, -1), nan=0.0, posinf=10.0, neginf=-10.0)
-            ml_prob = float(model.predict_proba(X)[0, 1])
-            ml_prob = max(0.01, min(0.99, ml_prob))
+        # Velocity check: compare entry candle close vs 15s-ago candle
+        vel_candle_ms = entry_time_ms - 15 * 1000
+        # Round to nearest minute
+        vel_candle_ms = (vel_candle_ms // 60000) * 60000
+        vel_candle = candle_map.get(vel_candle_ms)
+        if vel_candle:
+            velocity = (entry_candle.close - vel_candle.close) / vel_candle.close * 100
+            # Velocity must agree with displacement
+            if displacement_pct > 0 and velocity < 0:
+                t += window_interval
+                continue
+            if displacement_pct < 0 and velocity > 0:
+                t += window_interval
+                continue
         else:
-            ml_prob = sig_prob  # fallback
-        ml_dir = "BUY_YES" if displacement_pct > 0 else "BUY_NO"
-        ml_win_prob = ml_prob if ml_dir == "BUY_YES" else 1.0 - ml_prob
+            velocity = 0.0
 
-        # Simulate PM mid
-        pm_mid = simulate_pm_mid(sig_prob)  # same for both
-
-        # Process each model
-        for label, win_prob, fair_prob in [
-            ("ml", ml_win_prob, ml_prob),
-            ("sigmoid", sig_win_prob, sig_prob),
-        ]:
-            direction = "BUY_YES" if displacement_pct > 0 else "BUY_NO"
-
-            if direction == "BUY_YES":
-                token_price = pm_mid
-                spread = (fair_prob - pm_mid) * 100
-            else:
-                token_price = 1.0 - pm_mid
-                spread = ((1.0 - fair_prob) - (1.0 - pm_mid)) * 100
-
-            if spread < MIN_EDGE_PCT:
+        # Compute P(Up) — ML or sigmoid
+        if model is not None:
+            features = FeatureEngine.compute_from_candles(
+                candle_map=candle_map,
+                window_start_ms=t,
+                entry_time_ms=entry_time_ms,
+            )
+            if features is None:
+                t += window_interval
                 continue
+            X = np.nan_to_num(features.reshape(1, -1), nan=0.0, posinf=10.0, neginf=-10.0)
+            fair_up_prob = float(model.predict_proba(X)[0, 1])
+            fair_up_prob = max(0.01, min(0.99, fair_up_prob))
+        else:
+            fair_up_prob = sigmoid(displacement_pct, scale)
+            fair_up_prob = max(0.01, min(0.99, fair_up_prob))
 
-            kelly, payout = kelly_sizing(win_prob, token_price)
-            if kelly < 0.005:
-                continue
-            if not (0.05 <= token_price <= 0.80):
-                continue
+        # Direction follows displacement
+        direction = "BUY_YES" if displacement_pct > 0 else "BUY_NO"
 
-            won = (direction == "BUY_YES" and outcome_up) or \
-                  (direction == "BUY_NO" and not outcome_up)
+        # Simulate PM pricing: mid starts ~50c, moves slightly with displacement
+        # Real PM markets have mid ~48-52c for most of the window
+        pm_mid = 0.50 + displacement_pct * 0.5  # slight PM reaction
+        pm_mid = max(0.20, min(0.80, pm_mid))
 
-            pnl = 1.0 * payout if won else -1.0
+        # Edge calculation
+        if direction == "BUY_YES":
+            edge = fair_up_prob - pm_mid
+            entry_price = pm_mid + 0.01  # buy at ask (mid + 1c spread)
+        else:
+            edge = (1.0 - fair_up_prob) - (1.0 - pm_mid)
+            entry_price = (1.0 - pm_mid) + 0.01
 
-            results[label].append({
-                "ws_ms": ws_ms,
-                "direction": direction,
-                "displacement": displacement_pct,
-                "fair_prob": fair_prob,
-                "win_prob": win_prob,
-                "pm_mid": pm_mid,
-                "kelly": kelly,
-                "token_price": token_price,
-                "won": won,
-                "pnl": pnl,
-            })
+        entry_price = max(0.10, min(0.90, entry_price))
 
-    return results
-
-
-def print_results(results):
-    print(f"\n{'='*70}")
-    print(f"{'ML MODEL':^35} vs {'SIGMOID':^35}")
-    print(f"{'='*70}")
-
-    for label in ["ml", "sigmoid"]:
-        trades = results[label]
-        if not trades:
-            print(f"\n  {label.upper()}: No trades")
+        # Min edge filter
+        if edge < min_edge_pct:
+            t += window_interval
             continue
 
-        wins = [t for t in trades if t["won"]]
-        total_pnl = sum(t["pnl"] for t in trades)
-        buy_yes = [t for t in trades if t["direction"] == "BUY_YES"]
-        buy_no = [t for t in trades if t["direction"] == "BUY_NO"]
+        # Kelly sizing
+        prob = fair_up_prob if direction == "BUY_YES" else (1.0 - fair_up_prob)
+        payout = (1.0 / entry_price) - 1.0
+        q = 1.0 - prob
+        kelly = (prob * payout - q) / payout
+        if kelly < 0.005:
+            t += window_interval
+            continue
 
-        print(f"\n  {label.upper()}:")
-        print(f"    Trades:     {len(trades):,}")
-        print(f"    Win rate:   {len(wins)/len(trades)*100:.1f}%")
-        print(f"    Total P&L:  ${total_pnl:+,.0f}")
-        print(f"    BUY_YES:    {len(buy_yes)} ({sum(1 for t in buy_yes if t['won'])}W)")
-        print(f"    BUY_NO:     {len(buy_no)} ({sum(1 for t in buy_no if t['won'])}W)")
+        # Outcome
+        btc_went_up = resolve_candle.close > window_open_candle.open
+        won = (direction == "BUY_YES" and btc_went_up) or \
+              (direction == "BUY_NO" and not btc_went_up)
 
-        # By displacement bucket
-        print(f"    WR by |Displacement|:")
-        disps = np.array([abs(t["displacement"]) for t in trades])
-        wons = np.array([t["won"] for t in trades])
-        for lo, hi in [(0.03, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 0.50), (0.50, 999)]:
-            mask = (disps >= lo) & (disps < hi)
-            if mask.sum() > 0:
-                wr = wons[mask].mean() * 100
-                print(f"      {lo:.2f}-{hi:.2f}%: {mask.sum():>5} trades, {wr:.1f}% WR")
+        if won:
+            pnl = bet_size * payout
+        else:
+            pnl = -bet_size
 
-    # Head-to-head
-    ml_ws = {t["ws_ms"]: t for t in results["ml"]}
-    sig_ws = {t["ws_ms"]: t for t in results["sigmoid"]}
-    common = set(ml_ws.keys()) & set(sig_ws.keys())
+        trades.append({
+            "timestamp_ms": t,
+            "direction": direction,
+            "displacement_pct": displacement_pct,
+            "fair_prob": fair_up_prob,
+            "pm_mid": pm_mid,
+            "entry_price": entry_price,
+            "edge": edge,
+            "kelly": kelly,
+            "won": won,
+            "pnl": pnl,
+        })
 
-    if common:
-        ml_wins_h2h = sum(1 for ws in common if ml_ws[ws]["won"])
-        sig_wins_h2h = sum(1 for ws in common if sig_ws[ws]["won"])
-        both_right = sum(1 for ws in common if ml_ws[ws]["won"] and sig_ws[ws]["won"])
-        ml_only = sum(1 for ws in common if ml_ws[ws]["won"] and not sig_ws[ws]["won"])
-        sig_only = sum(1 for ws in common if not ml_ws[ws]["won"] and sig_ws[ws]["won"])
+        t += window_interval
 
-        print(f"\n  HEAD-TO-HEAD ({len(common)} common windows):")
-        print(f"    ML WR:        {ml_wins_h2h/len(common)*100:.1f}%")
-        print(f"    Sigmoid WR:   {sig_wins_h2h/len(common)*100:.1f}%")
-        print(f"    Both right:   {both_right}")
-        print(f"    ML only right: {ml_only}")
-        print(f"    Sig only right: {sig_only}")
+    # Summarize
+    if not trades:
+        return {"label": label, "trades": 0}
 
-    # Trade selection differences
-    ml_only_trades = set(ml_ws.keys()) - set(sig_ws.keys())
-    sig_only_trades = set(sig_ws.keys()) - set(ml_ws.keys())
-    if ml_only_trades:
-        ml_unique = [ml_ws[ws] for ws in ml_only_trades]
-        ml_unique_wr = sum(1 for t in ml_unique if t["won"]) / len(ml_unique) * 100
-        print(f"\n    ML-only trades: {len(ml_unique)} ({ml_unique_wr:.1f}% WR)")
-    if sig_only_trades:
-        sig_unique = [sig_ws[ws] for ws in sig_only_trades]
-        sig_unique_wr = sum(1 for t in sig_unique if t["won"]) / len(sig_unique) * 100
-        print(f"    Sig-only trades: {len(sig_unique)} ({sig_unique_wr:.1f}% WR)")
+    wins = sum(1 for t in trades if t["won"])
+    losses = len(trades) - wins
+    total_pnl = sum(t["pnl"] for t in trades)
+    avg_win = np.mean([t["pnl"] for t in trades if t["won"]]) if wins else 0
+    avg_loss = np.mean([t["pnl"] for t in trades if not t["won"]]) if losses else 0
+
+    # Running equity curve
+    equity = [0.0]
+    for trade in trades:
+        equity.append(equity[-1] + trade["pnl"])
+    equity = np.array(equity)
+    max_dd = 0.0
+    peak = 0.0
+    for e in equity:
+        peak = max(peak, e)
+        dd = peak - e
+        max_dd = max(max_dd, dd)
+
+    # Monthly breakdown
+    monthly = {}
+    for trade in trades:
+        month = time.strftime("%Y-%m", time.gmtime(trade["timestamp_ms"] / 1000))
+        if month not in monthly:
+            monthly[month] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        if trade["won"]:
+            monthly[month]["wins"] += 1
+        else:
+            monthly[month]["losses"] += 1
+        monthly[month]["pnl"] += trade["pnl"]
+
+    # Win rate by direction
+    yes_trades = [t for t in trades if t["direction"] == "BUY_YES"]
+    no_trades = [t for t in trades if t["direction"] == "BUY_NO"]
+    yes_wr = sum(1 for t in yes_trades if t["won"]) / len(yes_trades) * 100 if yes_trades else 0
+    no_wr = sum(1 for t in no_trades if t["won"]) / len(no_trades) * 100 if no_trades else 0
+
+    return {
+        "label": label,
+        "trades": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wins / len(trades) * 100,
+        "total_pnl": total_pnl,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "max_drawdown": max_dd,
+        "final_equity": equity[-1],
+        "monthly": monthly,
+        "yes_trades": len(yes_trades),
+        "yes_wr": yes_wr,
+        "no_trades": len(no_trades),
+        "no_wr": no_wr,
+        "avg_edge": np.mean([t["edge"] for t in trades]),
+        "avg_kelly": np.mean([t["kelly"] for t in trades]),
+        "avg_displacement": np.mean([abs(t["displacement_pct"]) for t in trades]),
+        "equity_curve": equity,
+    }
+
+
+def print_results(r):
+    if r["trades"] == 0:
+        print(f"\n  {r['label']}: NO TRADES")
+        return
+
+    print(f"\n  {'='*65}")
+    print(f"  {r['label']} BACKTEST RESULTS")
+    print(f"  {'='*65}")
+    print(f"  Total trades:    {r['trades']:,}")
+    print(f"  Win rate:        {r['win_rate']:.1f}% ({r['wins']}W / {r['losses']}L)")
+    print(f"  Total P&L:       ${r['total_pnl']:+,.2f}")
+    print(f"  Avg win:         ${r['avg_win']:+.2f}")
+    print(f"  Avg loss:        ${r['avg_loss']:.2f}")
+    print(f"  Max drawdown:    ${r['max_drawdown']:.2f}")
+    print(f"  Final equity:    ${r['final_equity']:+,.2f}")
+    print(f"  Avg edge:        {r['avg_edge']*100:.2f}%")
+    print(f"  Avg Kelly:       {r['avg_kelly']*100:.2f}%")
+    print(f"  Avg |displace|:  {r['avg_displacement']:.4f}%")
+    print(f"\n  Direction breakdown:")
+    print(f"    BUY_YES: {r['yes_trades']:,} trades, {r['yes_wr']:.1f}% WR")
+    print(f"    BUY_NO:  {r['no_trades']:,} trades, {r['no_wr']:.1f}% WR")
+    print(f"\n  Monthly breakdown:")
+    print(f"  {'Month':>10} {'Trades':>8} {'WR':>7} {'P&L':>10}")
+    for month in sorted(r["monthly"]):
+        m = r["monthly"][month]
+        total = m["wins"] + m["losses"]
+        wr = m["wins"] / total * 100 if total else 0
+        print(f"  {month:>10} {total:>8} {wr:>6.1f}% ${m['pnl']:>+9.2f}")
 
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--months", type=int, default=2, help="Months of test data")
-    parser.add_argument("--model", default="models/displacement_model.joblib")
+    parser.add_argument("--months", type=int, default=3)
+    parser.add_argument("--bet-size", type=float, default=5.0)
     args = parser.parse_args()
 
     print("=" * 70)
-    print("BACKTEST: ML Model vs Sigmoid")
+    print("BACKTEST: ML MODEL vs SIGMOID (3-month Binance data)")
     print("=" * 70)
 
-    # Load model
-    artifact = joblib.load(args.model)
-    model = artifact["model"]
-    print(f"Model loaded: {args.model}")
-    print(f"Training metrics: {artifact.get('metrics', {})}")
-
-    # Fetch recent test data (last N months)
+    # Fetch data
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - (args.months * 30 * 24 * 60 * 60 * 1000)
-
-    print(f"\nFetching {args.months} months of Binance data...")
+    print(f"\nFetching {args.months} months of Binance 1-min klines...")
     raw = fetch_binance_klines("BTCUSDT", "1m", start_ms, now_ms)
-    candles = [Candle(k) for k in raw]
+    candles = parse_klines(raw)
     candle_map = {c.open_time_ms: c for c in candles}
     print(f"Fetched {len(candles):,} candles")
+    print(f"Period: {time.strftime('%Y-%m-%d', time.gmtime(candles[0].open_time_ms/1000))} -> "
+          f"{time.strftime('%Y-%m-%d', time.gmtime(candles[-1].open_time_ms/1000))}")
 
-    # Generate windows
-    first_ms = candles[0].open_time_ms
-    last_ms = candles[-1].open_time_ms
-    interval = 5 * 60 * 1000
-    first_window = (first_ms // interval + 1) * interval
-    windows = []
-    t = first_window
-    while t + interval <= last_ms:
-        windows.append(t)
-        t += interval
-    print(f"Windows: {len(windows):,}")
+    # Load ML model
+    print("\nLoading ML model...")
+    import joblib
+    model_path = "models/displacement_model.joblib"
+    if os.path.exists(model_path):
+        artifact = joblib.load(model_path)
+        ml_model = artifact["model"]
+        print(f"  Model loaded: AUC={artifact['metrics'].get('auc', 'N/A'):.4f}")
+    else:
+        print("  NO ML MODEL FOUND — skipping ML backtest")
+        ml_model = None
 
-    np.random.seed(42)
-    results = run_backtest(candle_map, windows, model)
-    print_results(results)
+    # Run backtests
+    print(f"\nRunning Sigmoid (scale=10) backtest (bet=${args.bet_size})...")
+    sig_results = run_backtest(candles, candle_map, model=None, label="SIGMOID (scale=10)",
+                               scale=10.0, bet_size=args.bet_size)
+    print_results(sig_results)
+
+    if ml_model:
+        print(f"\nRunning ML model backtest (bet=${args.bet_size})...")
+        ml_results = run_backtest(candles, candle_map, model=ml_model, label="ML MODEL",
+                                   bet_size=args.bet_size)
+        print_results(ml_results)
+
+        # Head-to-head
+        print(f"\n  {'='*65}")
+        print(f"  HEAD-TO-HEAD COMPARISON")
+        print(f"  {'='*65}")
+        print(f"  {'Metric':<25} {'Sigmoid':>15} {'ML':>15} {'Diff':>10}")
+        print(f"  {'-'*65}")
+        if sig_results["trades"] and ml_results["trades"]:
+            metrics = [
+                ("Trades", sig_results["trades"], ml_results["trades"]),
+                ("Win Rate %", sig_results["win_rate"], ml_results["win_rate"]),
+                ("Total P&L $", sig_results["total_pnl"], ml_results["total_pnl"]),
+                ("Max Drawdown $", sig_results["max_drawdown"], ml_results["max_drawdown"]),
+                ("Avg Edge %", sig_results["avg_edge"]*100, ml_results["avg_edge"]*100),
+                ("BUY_YES WR %", sig_results["yes_wr"], ml_results["yes_wr"]),
+                ("BUY_NO WR %", sig_results["no_wr"], ml_results["no_wr"]),
+            ]
+            for name, sig_val, ml_val in metrics:
+                diff = ml_val - sig_val
+                print(f"  {name:<25} {sig_val:>15.2f} {ml_val:>15.2f} {diff:>+10.2f}")
+
+    # Also test sigmoid with higher scale (original sensitivity=50)
+    print(f"\n\nRunning Sigmoid (scale=50) backtest for comparison...")
+    sig50_results = run_backtest(candles, candle_map, model=None, label="SIGMOID (scale=50)",
+                                  scale=50.0, bet_size=args.bet_size)
+    print_results(sig50_results)
+
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    all_results = [sig_results, sig50_results]
+    if ml_model:
+        all_results.insert(1, ml_results)
+    print(f"  {'Model':<25} {'Trades':>8} {'WR':>7} {'P&L':>12} {'MaxDD':>10}")
+    print(f"  {'-'*62}")
+    for r in all_results:
+        if r["trades"]:
+            print(f"  {r['label']:<25} {r['trades']:>8} {r['win_rate']:>6.1f}% ${r['total_pnl']:>+10.2f} ${r['max_drawdown']:>8.2f}")
 
 
 if __name__ == "__main__":

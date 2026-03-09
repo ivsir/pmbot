@@ -34,6 +34,7 @@ from src.layer3_portfolio.portfolio_manager import PortfolioManager
 from src.layer3_portfolio.tail_risk import TailRiskAgent
 from src.layer3_portfolio.platform_risk import PlatformRiskMonitor
 from src.layer4_execution.execution_agent import ExecutionAgent, ExecutionResult
+from src.layer1_research.trade_logger import TradeLogger
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +90,7 @@ class ArbitrageNodes:
         self._settings = get_settings()
         # Maps position_id → ResearchOutput that generated the trade
         self._trade_research_map: dict[str, ResearchOutput] = {}
+        self._trade_logger = TradeLogger()
 
     # ── Node: Ingest Data (Layer 0) ──
 
@@ -152,6 +154,7 @@ class ArbitrageNodes:
             if research:
                 was_profitable = pos.pnl_usd > 0
                 self._research.provide_feedback(research, was_profitable)
+                self._trade_logger.log_outcome(pos.id, was_profitable, pos.pnl_usd)
                 logger.info(
                     "graph.feedback_recorded",
                     position_id=pos.id,
@@ -271,6 +274,19 @@ class ArbitrageNodes:
             research = state.get("research_for_trade")
             if research:
                 self._trade_research_map[result.position_id] = research
+
+                # Log features for ML retraining
+                spread_opp = research.spread_opp
+                features = getattr(spread_opp, "ml_features", None) if spread_opp else None
+                alpha = state.get("alpha_signal")
+                self._trade_logger.log_entry(
+                    position_id=result.position_id,
+                    market_id=research.market_id,
+                    direction=research.direction,
+                    research_output=research,
+                    signal=alpha,
+                    features=features,
+                )
 
             logger.info(
                 "graph.trade_executed",

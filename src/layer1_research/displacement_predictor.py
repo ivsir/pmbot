@@ -93,6 +93,11 @@ class DisplacementPredictor:
         raw = 1.0 / (1.0 + math.exp(-self._sigmoid_scale * displacement_pct))
         return max(0.01, min(0.99, raw))
 
+    def reload(self) -> None:
+        """Hot-reload the model from disk (called after retraining)."""
+        settings = get_settings()
+        self._load_model(Path(settings.ml_model_path))
+
     @property
     def is_ml_active(self) -> bool:
         return self._using_ml

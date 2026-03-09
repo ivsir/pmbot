@@ -30,7 +30,7 @@ from src.layer1_research.feature_engine import (
 
 def fetch_binance_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> list:
     """Fetch all klines from Binance between start_ms and end_ms."""
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://api.binance.us/api/v3/klines"
     all_klines = []
     current_start = start_ms
 
