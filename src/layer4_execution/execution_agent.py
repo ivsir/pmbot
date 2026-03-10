@@ -263,7 +263,7 @@ class ExecutionAgent:
             if use_maker:
                 wait_ms = 30_000  # maker: sit on book until settlement
             elif self._settings.market_mode == "5min_updown":
-                wait_ms = 30_000  # taker: give thin books more time
+                wait_ms = 5_000   # taker: kill stale orders fast to preserve signal edge
             else:
                 wait_ms = None  # use default MAX_FILL_WAIT_MS
             fill = await self._wait_for_fill(order_id, sniper_order, max_wait_override_ms=wait_ms)
