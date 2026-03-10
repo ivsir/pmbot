@@ -118,11 +118,6 @@ class AlphaSignalGenerator:
         if research.max_safe_size_usd > 0:
             optimal_size = min(optimal_size, research.max_safe_size_usd)
 
-        # Hard cap: never bet more than MAX_BID_USD per trade
-        max_bid = getattr(self._settings, 'max_bid_usd', 10.0)
-        if max_bid > 0:
-            optimal_size = min(optimal_size, max_bid)
-
         # Expected profit
         expected_profit = optimal_size * payout_ratio * win_prob - optimal_size * q
 
