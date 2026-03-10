@@ -113,17 +113,9 @@ a:hover { text-decoration: underline; }
 
 .main {
   margin-left: var(--sidebar-width);
+  flex: 1;
   min-height: 100vh;
-  padding: 32px 48px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.main > .tab-content,
-.main > [id^="tab-"] {
-  width: 100%;
-  max-width: 1200px;
+  padding: 32px;
 }
 
 
@@ -851,6 +843,7 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: flex-start;
   padding-top: 15vh;
+  padding-left: calc(var(--sidebar-width) * 0.25);
   height: calc(100vh - 64px);
   text-align: center;
   gap: 0;
@@ -929,7 +922,7 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   gap: 12px;
   width: 100%;
-  max-width: 520px;
+  max-width: 380px;
   flex: 1;
   overflow-y: auto;
   padding-bottom: 32px;
