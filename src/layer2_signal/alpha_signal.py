@@ -121,10 +121,10 @@ class AlphaSignalGenerator:
         # Expected profit
         expected_profit = optimal_size * payout_ratio * win_prob - optimal_size * q
 
-        # PM price quality filter: only enter when our token is priced 5-80¢.
-        # Below 5¢ means extreme disagreement (likely bad signal).
-        # Above 80¢ means the market already agrees (no edge left).
-        price_quality_ok = 0.05 <= entry_price <= 0.80
+        # PM price quality filter: only enter when PM hasn't repriced yet.
+        # Below 20¢ means extreme disagreement (likely bad signal).
+        # Above 55¢ means PM already caught up — edge is gone.
+        price_quality_ok = 0.20 <= entry_price <= 0.55
 
         # Entry decision — Kelly is the gatekeeper for positive EV.
         # Size is capped by MAX_BID_USD in risk_filter, so no overbet guard needed.
