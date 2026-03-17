@@ -10,8 +10,6 @@ Graph topology:
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import operator
 import time
 from dataclasses import dataclass, field
@@ -36,7 +34,6 @@ from src.layer3_portfolio.portfolio_manager import PortfolioManager
 from src.layer3_portfolio.tail_risk import TailRiskAgent
 from src.layer3_portfolio.platform_risk import PlatformRiskMonitor
 from src.layer4_execution.execution_agent import ExecutionAgent, ExecutionResult
-from src.layer1_research.trade_logger import TradeLogger
 
 logger = structlog.get_logger(__name__)
 
@@ -92,58 +89,6 @@ class ArbitrageNodes:
         self._settings = get_settings()
         # Maps position_id → ResearchOutput that generated the trade
         self._trade_research_map: dict[str, ResearchOutput] = {}
-        self._research_map_file = "data/pending_research.json"
-        self._load_research_map()
-        self._trade_logger = TradeLogger()
-
-    # ── Research Map Persistence ──
-
-    def _save_research_map(self) -> None:
-        """Persist pending research→position map so feedback works after restart."""
-        try:
-            os.makedirs(os.path.dirname(self._research_map_file), exist_ok=True)
-            serializable = {}
-            for pos_id, research in self._trade_research_map.items():
-                serializable[pos_id] = {
-                    "market_id": research.market_id,
-                    "direction": research.direction,
-                    "spread_score": research.spread_score,
-                    "latency_score": research.latency_score,
-                    "liquidity_score": research.liquidity_score,
-                    "combined_probability": research.combined_probability,
-                    "confidence": research.confidence,
-                    "edge_pct": research.edge_pct,
-                    "max_safe_size_usd": research.max_safe_size_usd,
-                    "timestamp_ms": research.timestamp_ms,
-                }
-            with open(self._research_map_file, "w") as f:
-                json.dump(serializable, f)
-        except Exception as exc:
-            logger.warning("graph.research_map_save_failed", error=str(exc))
-
-    def _load_research_map(self) -> None:
-        """Load persisted research map from disk."""
-        try:
-            if not os.path.exists(self._research_map_file):
-                return
-            with open(self._research_map_file) as f:
-                data = json.load(f)
-            for pos_id, d in data.items():
-                self._trade_research_map[pos_id] = ResearchOutput(
-                    market_id=d["market_id"],
-                    direction=d["direction"],
-                    spread_score=d["spread_score"],
-                    latency_score=d["latency_score"],
-                    liquidity_score=d["liquidity_score"],
-                    combined_probability=d["combined_probability"],
-                    confidence=d["confidence"],
-                    edge_pct=d.get("edge_pct", 0),
-                    max_safe_size_usd=d.get("max_safe_size_usd", 0),
-                    timestamp_ms=d.get("timestamp_ms", 0),
-                )
-            logger.info("graph.research_map_restored", entries=len(self._trade_research_map))
-        except Exception as exc:
-            logger.warning("graph.research_map_load_failed", error=str(exc))
 
     # ── Node: Ingest Data (Layer 0) ──
 
@@ -202,22 +147,17 @@ class ArbitrageNodes:
     async def collect_feedback(self, state: dict) -> dict:
         """Process feedback from recently closed positions to update Bayesian priors."""
         recently_closed = self._portfolio.get_recently_closed()
-        changed = False
         for pos in recently_closed:
             research = self._trade_research_map.pop(pos.id, None)
-            changed = True
             if research:
                 was_profitable = pos.pnl_usd > 0
                 self._research.provide_feedback(research, was_profitable)
-                self._trade_logger.log_outcome(pos.id, was_profitable, pos.pnl_usd)
                 logger.info(
                     "graph.feedback_recorded",
                     position_id=pos.id,
                     profitable=was_profitable,
                     pnl=round(pos.pnl_usd, 2),
                 )
-        if changed:
-            self._save_research_map()
         return {}
 
     # ── Node: Research + Risk (Layer 1 & 3 — parallel) ──
@@ -331,20 +271,6 @@ class ArbitrageNodes:
             research = state.get("research_for_trade")
             if research:
                 self._trade_research_map[result.position_id] = research
-                self._save_research_map()
-
-                # Log features for ML retraining
-                spread_opp = research.spread_opp
-                features = getattr(spread_opp, "ml_features", None) if spread_opp else None
-                alpha = state.get("alpha_signal")
-                self._trade_logger.log_entry(
-                    position_id=result.position_id,
-                    market_id=research.market_id,
-                    direction=research.direction,
-                    research_output=research,
-                    signal=alpha,
-                    features=features,
-                )
 
             logger.info(
                 "graph.trade_executed",

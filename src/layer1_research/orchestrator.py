@@ -191,8 +191,8 @@ class ResearchOrchestrator:
             if secs_into_window < 0:
                 continue
 
-            if secs_into_window > 240:
-                continue  # only trade in first 4 min of 5-min window
+            if secs_into_window > 60:
+                continue  # only trade in first 60s — matches backtest
 
             # Debug: log when we're in the tradeable window
             if self._tick_count % 100 == 1:

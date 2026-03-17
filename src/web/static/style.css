@@ -116,6 +116,7 @@ a:hover { text-decoration: underline; }
   flex: 1;
   min-height: 100vh;
   padding: 32px;
+  max-width: 1400px;
 }
 
 
@@ -843,7 +844,6 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: flex-start;
   padding-top: 15vh;
-  padding-left: calc(var(--sidebar-width) * 0.25);
   height: calc(100vh - 64px);
   text-align: center;
   gap: 0;
@@ -909,6 +909,13 @@ a:hover { text-decoration: underline; }
 .overview-pnl-value.pnl-positive { color: var(--accent-green); }
 .overview-pnl-value.pnl-negative { color: var(--accent-red); }
 .overview-pnl-value.pnl-zero { color: var(--text-tertiary); }
+
+.overview-stats-row { display: flex; gap: 32px; justify-content: center; margin-top: 16px; }
+.overview-stat { text-align: center; }
+.overview-stat-label { display: block; font-size: 11px; letter-spacing: 1px; color: var(--text-tertiary); margin-bottom: 4px; }
+.overview-stat-value { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.warmup-bar { display: inline-block; width: 60px; height: 6px; background: var(--bg-secondary); border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+.warmup-fill { display: block; height: 100%; background: var(--accent-green); border-radius: 3px; transition: width 0.5s; }
 
 .overview-hero .mode-banner {
   margin-bottom: 32px;

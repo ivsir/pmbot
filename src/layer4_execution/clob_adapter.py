@@ -443,14 +443,14 @@ class ClobAdapter:
     async def redeem_positions(self, condition_id: str) -> str | None:
         """Redeem winning positions for a resolved market.
 
-        Uses gasless relayer first (proxy wallet pays gas, no EOA POL needed).
-        Falls back to direct web3 if relayer is unavailable.
+        Uses direct web3 via factory (routes through correct proxy wallet).
+        Falls back to gasless relayer if web3 fails.
         """
-        result = await self._redeem_via_relayer(condition_id)
+        result = await self._redeem_via_web3(condition_id)
         if result:
             return result
-        logger.info("clob_adapter.redeem_relayer_failed_trying_web3", condition_id=condition_id[:20] + "...")
-        return await self._redeem_via_web3(condition_id)
+        logger.info("clob_adapter.redeem_web3_failed_trying_relayer", condition_id=condition_id[:20] + "...")
+        return await self._redeem_via_relayer(condition_id)
 
     async def _redeem_via_relayer(self, condition_id: str) -> str | None:
         """Redeem via Polymarket's gasless builder relayer (no gas fees)."""

@@ -59,8 +59,7 @@ class AlphaSignalGenerator:
 
     def __init__(self, wallet_balance_fn=None) -> None:
         self._settings = get_settings()
-        self._kelly_min = self._settings.kelly_fraction
-        self._kelly_cap = getattr(self._settings, 'kelly_fraction_max', self._settings.kelly_fraction)
+        self._kelly_cap = self._settings.kelly_fraction
         self._max_position = self._settings.max_position_usd
         self._wallet_balance_fn = wallet_balance_fn
         self._signals: list[AlphaSignal] = []
@@ -100,8 +99,8 @@ class AlphaSignalGenerator:
         kelly_raw = (win_prob * payout_ratio - q) / payout_ratio
         kelly_raw = max(0.0, kelly_raw)
 
-        # Clamp Kelly fraction to [min, max] range
-        kelly_fraction = max(min(kelly_raw, self._kelly_cap), self._kelly_min) if kelly_raw > 0.005 else kelly_raw
+        # Cap Kelly fraction (fractional Kelly for safety)
+        kelly_fraction = min(kelly_raw, self._kelly_cap)
 
         # Optimal size: Kelly fraction of wallet (proportional to edge)
         bankroll = self._max_position
@@ -121,10 +120,10 @@ class AlphaSignalGenerator:
         # Expected profit
         expected_profit = optimal_size * payout_ratio * win_prob - optimal_size * q
 
-        # PM price quality filter: only enter when PM hasn't repriced yet.
-        # Below 20¢ means extreme disagreement (likely bad signal).
-        # Above 55¢ means PM already caught up — edge is gone.
-        price_quality_ok = 0.20 <= entry_price <= 0.55
+        # PM price quality filter: only enter when our token is priced 5-80¢.
+        # Below 5¢ means extreme disagreement (likely bad signal).
+        # Above 80¢ means the market already agrees (no edge left).
+        price_quality_ok = 0.05 <= entry_price <= 0.80
 
         # Entry decision — Kelly is the gatekeeper for positive EV.
         # Size is capped by MAX_BID_USD in risk_filter, so no overbet guard needed.

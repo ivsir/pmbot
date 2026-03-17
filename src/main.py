@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import signal
 import sys
 import time
@@ -182,9 +181,6 @@ class ArbitrageSystem:
         # Start auto-redemption loop for live mode
         if self._settings.live_trading_enabled:
             tasks.append(asyncio.create_task(self._redemption_loop()))
-
-        # Start auto-retrain loop (every 3 hours)
-        tasks.append(asyncio.create_task(self._retrain_loop()))
 
         # Start Chainlink if configured (skip placeholder URLs)
         chainlink_url = self._settings.chainlink_rpc_url
@@ -659,80 +655,6 @@ class ArbitrageSystem:
             except Exception as exc:
                 logger.warning("system.redemption_error", error=str(exc))
                 await asyncio.sleep(30)
-
-    async def _retrain_loop(self) -> None:
-        """Periodically retrain the ML model with live trade data every 3 hours."""
-        RETRAIN_INTERVAL_S = 3 * 60 * 60  # 3 hours
-        MIN_LIVE_TRADES = 10
-        logger.info("system.retrain_loop_started", interval_h=3)
-
-        # Wait 2 min before first retrain check
-        await asyncio.sleep(2 * 60)
-
-        while self._running:
-            try:
-                import pandas as pd
-                csv_path = "data/live_trades.csv"
-
-                # Check if we have enough live trades
-                if not os.path.exists(csv_path):
-                    logger.info("system.retrain_skip", reason="no_csv")
-                    await asyncio.sleep(RETRAIN_INTERVAL_S)
-                    continue
-
-                df = pd.read_csv(csv_path)
-                completed = df[df["outcome"].notna() & (df["outcome"] != "")]
-                if len(completed) < MIN_LIVE_TRADES:
-                    logger.info(
-                        "system.retrain_skip",
-                        reason="too_few_trades",
-                        trades=len(completed),
-                        needed=MIN_LIVE_TRADES,
-                    )
-                    await asyncio.sleep(RETRAIN_INTERVAL_S)
-                    continue
-
-                logger.info(
-                    "system.retrain_starting",
-                    live_trades=len(completed),
-                )
-
-                # Run retrain in a thread to avoid blocking the event loop
-                import subprocess
-                proc = await asyncio.create_subprocess_exec(
-                    sys.executable, "scripts/retrain_model.py",
-                    "--months", "3",
-                    "--min-live-trades", str(MIN_LIVE_TRADES),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode == 0:
-                    logger.info(
-                        "system.retrain_complete",
-                        output=stdout.decode()[-200:] if stdout else "",
-                    )
-                    # Hot-reload the model in the momentum detector
-                    try:
-                        self._research._momentum_detector._predictor.reload()
-                        logger.info("system.model_hot_reloaded")
-                    except Exception as e:
-                        logger.warning("system.model_reload_failed", error=str(e))
-                else:
-                    logger.warning(
-                        "system.retrain_failed",
-                        returncode=proc.returncode,
-                        stderr=stderr.decode()[-300:] if stderr else "",
-                    )
-
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("system.retrain_error", error=str(exc))
-
-            await asyncio.sleep(RETRAIN_INTERVAL_S)
 
     async def _balance_poll_loop(self) -> None:
         """Periodically check wallet balance and update standby state."""

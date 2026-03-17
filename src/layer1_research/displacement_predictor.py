@@ -28,6 +28,7 @@ class DisplacementPredictor:
         self._sigmoid_scale = settings.displacement_sigmoid_scale
         self._model = None
         self._feature_names = None
+        self._feature_indices = None
         self._using_ml = False
 
         if settings.ml_model_enabled:
@@ -48,6 +49,7 @@ class DisplacementPredictor:
             artifact = joblib.load(model_path)
             self._model = artifact["model"]
             self._feature_names = artifact["feature_names"]
+            self._feature_indices = artifact.get("feature_indices")
             self._using_ml = True
 
             logger.info(
@@ -77,7 +79,10 @@ class DisplacementPredictor:
             return self._sigmoid_fallback(displacement_pct)
 
         try:
-            X = np.nan_to_num(features.reshape(1, -1), nan=0.0, posinf=10.0, neginf=-10.0)
+            f = features
+            if self._feature_indices is not None:
+                f = features[self._feature_indices]
+            X = np.nan_to_num(f.reshape(1, -1), nan=0.0, posinf=10.0, neginf=-10.0)
             prob_up = self._model.predict_proba(X)[0, 1]
             prob_up = float(np.clip(prob_up, 0.01, 0.99))
             return prob_up
@@ -92,11 +97,6 @@ class DisplacementPredictor:
         """Original sigmoid: 1 / (1 + exp(-scale * disp))."""
         raw = 1.0 / (1.0 + math.exp(-self._sigmoid_scale * displacement_pct))
         return max(0.01, min(0.99, raw))
-
-    def reload(self) -> None:
-        """Hot-reload the model from disk (called after retraining)."""
-        settings = get_settings()
-        self._load_model(Path(settings.ml_model_path))
 
     @property
     def is_ml_active(self) -> bool:

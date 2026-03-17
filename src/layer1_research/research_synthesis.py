@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -81,22 +79,22 @@ class ResearchSynthesis:
     LATENCY_WEIGHT = 0.30
     LIQUIDITY_WEIGHT = 0.20
 
-    STATE_FILE = "data/bayesian_state.json"
-
     def __init__(self) -> None:
         settings = get_settings()
+        # Paper trader used 0.55 for both modes — proven profitable.
+        # Higher prior means signals fire more, but Bayesian fusion still
+        # requires multiple confirmations for high combined_probability.
         self.BASE_PRIOR = 0.55
         self._history: list[ResearchOutput] = []
-        # Default calibrated values
-        self._spread_tp_rate = 0.85
-        self._spread_fp_rate = 0.30
+        # Adaptive likelihood parameters — paper trader's calibrated values.
+        # Higher TP rates reflect that our signals genuinely predict profitability
+        # when momentum + latency arb agree.
+        self._spread_tp_rate = 0.85  # P(spread/momentum signal | profitable)
+        self._spread_fp_rate = 0.30  # P(spread/momentum signal | not profitable)
         self._latency_tp_rate = 0.80
         self._latency_fp_rate = 0.25
         self._liquidity_tp_rate = 0.90
         self._liquidity_fp_rate = 0.50
-        self._trade_count = 0
-        # Load persisted state if available (survives restarts)
-        self._load_state()
 
     def synthesize(
         self,
@@ -228,53 +226,6 @@ class ResearchSynthesis:
             self._spread_fp_rate += alpha * (output.spread_score - self._spread_fp_rate)
             self._latency_fp_rate += alpha * (output.latency_score - self._latency_fp_rate)
             self._liquidity_fp_rate += alpha * (output.liquidity_score - self._liquidity_fp_rate)
-        self._trade_count += 1
-        self._save_state()
-
-    def _save_state(self) -> None:
-        """Persist Bayesian priors to disk so they survive restarts."""
-        state = {
-            "spread_tp_rate": self._spread_tp_rate,
-            "spread_fp_rate": self._spread_fp_rate,
-            "latency_tp_rate": self._latency_tp_rate,
-            "latency_fp_rate": self._latency_fp_rate,
-            "liquidity_tp_rate": self._liquidity_tp_rate,
-            "liquidity_fp_rate": self._liquidity_fp_rate,
-            "base_prior": self.BASE_PRIOR,
-            "trade_count": self._trade_count,
-            "saved_at": time.time(),
-        }
-        try:
-            os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
-            with open(self.STATE_FILE, "w") as f:
-                json.dump(state, f, indent=2)
-        except Exception as exc:
-            logger.warning("bayesian.save_failed", error=str(exc))
-
-    def _load_state(self) -> None:
-        """Load persisted Bayesian priors from disk."""
-        try:
-            if not os.path.exists(self.STATE_FILE):
-                logger.info("bayesian.no_saved_state_using_defaults")
-                return
-            with open(self.STATE_FILE) as f:
-                state = json.load(f)
-            self._spread_tp_rate = state["spread_tp_rate"]
-            self._spread_fp_rate = state["spread_fp_rate"]
-            self._latency_tp_rate = state["latency_tp_rate"]
-            self._latency_fp_rate = state["latency_fp_rate"]
-            self._liquidity_tp_rate = state["liquidity_tp_rate"]
-            self._liquidity_fp_rate = state["liquidity_fp_rate"]
-            self.BASE_PRIOR = state.get("base_prior", 0.55)
-            self._trade_count = state.get("trade_count", 0)
-            logger.info(
-                "bayesian.state_restored",
-                trade_count=self._trade_count,
-                spread_tp=round(self._spread_tp_rate, 3),
-                spread_fp=round(self._spread_fp_rate, 3),
-            )
-        except Exception as exc:
-            logger.warning("bayesian.load_failed_using_defaults", error=str(exc))
 
     # ── Scoring helpers ──
 

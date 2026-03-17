@@ -415,6 +415,29 @@ function renderOverview(snap) {
     else pnlEl.classList.add('pnl-zero');
   }
 
+  // Win rate + W/L
+  const wins = ls.wins || 0;
+  const losses = ls.losses || 0;
+  setText('overview-wl', wins + ' / ' + losses);
+  const wrEl = document.getElementById('overview-win-rate');
+  if (wrEl) {
+    if (ls.win_rate != null) {
+      wrEl.textContent = (ls.win_rate * 100).toFixed(1) + '%';
+      wrEl.style.color = ls.win_rate >= 0.6 ? 'var(--accent-green)' : ls.win_rate >= 0.5 ? 'var(--accent-amber)' : 'var(--accent-red)';
+    } else {
+      wrEl.textContent = '--';
+    }
+  }
+
+  // Bayesian warmup
+  const bay = snap.bayesian || {};
+  const tc = bay.trade_count || 0;
+  const target = bay.warmup_target || 50;
+  const pct = Math.min(100, Math.round(tc / target * 100));
+  setText('warmup-pct', pct + '%');
+  const fillBar = document.getElementById('warmup-fill');
+  if (fillBar) fillBar.style.width = pct + '%';
+
   // Position cards — active on top, then resolved
   renderOverviewPositions(snap.active_positions || [], snap.closed_positions || []);
 }

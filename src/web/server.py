@@ -168,7 +168,20 @@ async def build_snapshot(system: Any) -> dict[str, Any]:
         "recent_spreads": recent_spreads,
         "recent_signals": recent_signals,
         "alerts": alerts,
+        "bayesian": _get_bayesian_state(system),
     }
+
+
+def _get_bayesian_state(system: Any) -> dict:
+    """Extract Bayesian warmup info from research synthesis."""
+    try:
+        syn = system._research._synthesis
+        return {
+            "trade_count": getattr(syn, '_trade_count', 0),
+            "warmup_target": 50,
+        }
+    except Exception:
+        return {"trade_count": 0, "warmup_target": 50}
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -384,10 +397,6 @@ def create_app(system: Any) -> FastAPI:
 async def start_server(
     app: FastAPI, host: str = "0.0.0.0", port: int = 8080
 ) -> None:
-    try:
-        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-        server = uvicorn.Server(config)
-        await server.serve()
-    except (OSError, SystemExit) as exc:
-        import structlog
-        structlog.get_logger().warning("dashboard.port_unavailable", port=port, error=str(exc))
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    await server.serve()

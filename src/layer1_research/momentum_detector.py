@@ -15,7 +15,6 @@ import math
 import time
 from dataclasses import dataclass, field
 
-import numpy as np
 import structlog
 
 from config.settings import get_settings
@@ -56,7 +55,6 @@ class MomentumSignal:
     window_end_ms: int = 0
     seconds_until_start: float = 0.0
     seconds_until_end: float = 0.0
-    ml_features: np.ndarray | None = None  # 24-feature vector for trade logging
 
     timestamp_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 
@@ -219,7 +217,6 @@ class MomentumDetector:
             window_end_ms=window_end_ms,
             seconds_until_start=max(0, (window_start_ms - now_ms) / 1000) if window_start_ms else 0,
             seconds_until_end=max(0, (window_end_ms - now_ms) / 1000) if window_end_ms else 0,
-            ml_features=features,
         )
 
         self._opportunities.append(signal)
