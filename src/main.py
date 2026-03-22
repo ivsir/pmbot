@@ -693,9 +693,9 @@ class ArbitrageSystem:
                 if cycle % 100 == 0:
                     await self._log_stats(cycle)
 
-                # Adaptive throttle: target ~20 cycles/second (50ms per cycle)
+                # Adaptive throttle: target ~2 cycles/second (500ms per cycle)
                 elapsed_ms = time.time() * 1000 - cycle_start
-                target_ms = 50
+                target_ms = 500
                 sleep_s = max(0, (target_ms - elapsed_ms) / 1000)
                 await asyncio.sleep(sleep_s)
 
